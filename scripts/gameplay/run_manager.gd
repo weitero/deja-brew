@@ -56,6 +56,24 @@ const OIL_SLICK_SLIDE_SEC := 1.0
 const PISTON_INTERVAL := 12.0
 const PISTON_TELEGRAPH_SEC := 2.0
 const PISTON_ACTIVE_SEC := 3.0
+const PEBBLE_COUNT := 6
+const ROTTEN_BEAN_COUNT := 5
+const BROKEN_BEAN_COUNT := 5
+const ROTTEN_SPREAD_INTERVAL := 1.0
+const SHAKE_PURGE_WINDOW_SEC := 0.45
+const SHAKE_PURGE_TURNS := 3
+const DECAF_COUNT := 3
+const WATER_DROP_COUNT := 3
+const DECAF_MOVE_INTERVAL := 0.45
+const WATER_DROP_MOVE_INTERVAL := 0.24
+const ENEMY_BEAN_LOSS_FRESHNESS := 5.0
+const SCOOP_INTERVAL := 14.0
+const SCOOP_TELEGRAPH_SEC := 2.0
+const SCOOP_RADIUS_CELLS := 2.6
+const ARM_INTERVAL := 11.0
+const ARM_TELEGRAPH_SEC := 1.0
+const ARM_ACTIVE_SEC := 0.8
+const ARM_PUSH_CELLS := 2
 
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
@@ -123,6 +141,29 @@ var piston_timer := PISTON_INTERVAL
 var piston_telegraph_left := 0.0
 var piston_active_left := 0.0
 var piston_row := -1
+var pebble_cells: Array[Vector2i] = []
+var rotten_bean_cells: Array[Vector2i] = []
+var broken_bean_cells: Array[Vector2i] = []
+var broken_segment_indices: Array[int] = []
+var rotten_segment_indices: Array[int] = []
+var decaf_segment_indices: Array[int] = []
+var rotten_spread_timer := ROTTEN_SPREAD_INTERVAL
+var shake_combo_window_left := 0.0
+var shake_combo_count := 0
+var decaf_beans: Array[Dictionary] = []
+var water_drops: Array[Dictionary] = []
+var decaf_move_timer := DECAF_MOVE_INTERVAL
+var water_drop_move_timer := WATER_DROP_MOVE_INTERVAL
+var scoop_timer := SCOOP_INTERVAL
+var scoop_telegraph_left := 0.0
+var scoop_center := Vector2i(-1, -1)
+var arm_timer := ARM_INTERVAL
+var arm_telegraph_left := 0.0
+var arm_active_left := 0.0
+var arm_is_row := true
+var arm_line_index := -1
+var arm_push_dir := Vector2i.RIGHT
+var arm_applied := false
 
 func _ready() -> void:
 	rng.randomize()
@@ -172,6 +213,29 @@ func _ready() -> void:
 	piston_telegraph_left = 0.0
 	piston_active_left = 0.0
 	piston_row = -1
+	pebble_cells.clear()
+	rotten_bean_cells.clear()
+	broken_bean_cells.clear()
+	broken_segment_indices.clear()
+	rotten_segment_indices.clear()
+	decaf_segment_indices.clear()
+	rotten_spread_timer = ROTTEN_SPREAD_INTERVAL
+	shake_combo_window_left = 0.0
+	shake_combo_count = 0
+	decaf_beans.clear()
+	water_drops.clear()
+	decaf_move_timer = DECAF_MOVE_INTERVAL
+	water_drop_move_timer = WATER_DROP_MOVE_INTERVAL
+	scoop_timer = SCOOP_INTERVAL
+	scoop_telegraph_left = 0.0
+	scoop_center = Vector2i(-1, -1)
+	arm_timer = ARM_INTERVAL
+	arm_telegraph_left = 0.0
+	arm_active_left = 0.0
+	arm_is_row = true
+	arm_line_index = -1
+	arm_push_dir = Vector2i.RIGHT
+	arm_applied = false
 	game_state = GameState.START_MENU
 	best_score = max(best_score, saved_high_score)
 
@@ -209,6 +273,8 @@ func start_new_run() -> void:
 	bean_spawn_age.clear()
 	place_grinder_random()
 	setup_machine_hazards()
+	setup_ingredient_hazards()
+	setup_enemy_hazards()
 	spawn_idle_beans(rng.randi_range(8, 15))
 	bean_spawn_timer = 0.0
 	grinder_angle = 0.0
@@ -236,6 +302,24 @@ func start_new_run() -> void:
 	piston_telegraph_left = 0.0
 	piston_active_left = 0.0
 	piston_row = -1
+	broken_segment_indices.clear()
+	rotten_segment_indices.clear()
+	decaf_segment_indices.clear()
+	rotten_spread_timer = ROTTEN_SPREAD_INTERVAL
+	shake_combo_window_left = 0.0
+	shake_combo_count = 0
+	decaf_move_timer = DECAF_MOVE_INTERVAL
+	water_drop_move_timer = WATER_DROP_MOVE_INTERVAL
+	scoop_timer = SCOOP_INTERVAL
+	scoop_telegraph_left = 0.0
+	scoop_center = Vector2i(-1, -1)
+	arm_timer = ARM_INTERVAL
+	arm_telegraph_left = 0.0
+	arm_active_left = 0.0
+	arm_is_row = true
+	arm_line_index = -1
+	arm_push_dir = Vector2i.RIGHT
+	arm_applied = false
 	wake_pulses.clear()
 	queue_redraw()
 
@@ -275,11 +359,149 @@ func setup_machine_hazards() -> void:
 		conveyor_cells[Vector2i(x, top_row)] = Vector2i.RIGHT
 		conveyor_cells[Vector2i(x, bottom_row)] = Vector2i.LEFT
 
+func setup_ingredient_hazards() -> void:
+	pebble_cells.clear()
+	rotten_bean_cells.clear()
+	broken_bean_cells.clear()
+
+	var occupied := {}
+	for cell in get_grinder_cells():
+		occupied[cell] = true
+	for cell in grinding_teeth_cells:
+		occupied[cell] = true
+	for cell in gear_gap_cells:
+		occupied[cell] = true
+	for cell in oil_slick_cells:
+		occupied[cell] = true
+	for cell_key in conveyor_cells.keys():
+		occupied[cell_key] = true
+
+	for _i: int in range(PEBBLE_COUNT):
+		pebble_cells.append(random_inner_cell(occupied))
+	for _j: int in range(ROTTEN_BEAN_COUNT):
+		rotten_bean_cells.append(random_inner_cell(occupied))
+	for _k: int in range(BROKEN_BEAN_COUNT):
+		broken_bean_cells.append(random_inner_cell(occupied))
+
+func random_cardinal_dir() -> Vector2i:
+	var dirs: Array[Vector2i] = [Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT, Vector2i.UP]
+	return dirs[rng.randi_range(0, dirs.size() - 1)]
+
+func setup_enemy_hazards() -> void:
+	decaf_beans.clear()
+	water_drops.clear()
+
+	var occupied := {}
+	for cell in get_grinder_cells():
+		occupied[cell] = true
+	for cell in grinding_teeth_cells:
+		occupied[cell] = true
+	for cell in gear_gap_cells:
+		occupied[cell] = true
+	for cell in oil_slick_cells:
+		occupied[cell] = true
+	for cell in pebble_cells:
+		occupied[cell] = true
+	for cell in rotten_bean_cells:
+		occupied[cell] = true
+	for cell in broken_bean_cells:
+		occupied[cell] = true
+	for cell_key in conveyor_cells.keys():
+		occupied[cell_key] = true
+
+	for _i: int in range(DECAF_COUNT):
+		var cell := random_inner_cell(occupied)
+		decaf_beans.append({"cell": cell, "dir": random_cardinal_dir()})
+
+	for _j: int in range(WATER_DROP_COUNT):
+		var wcell := random_inner_cell(occupied)
+		water_drops.append({"cell": wcell, "dir": random_cardinal_dir()})
+
 func is_cell_in_list(cell: Vector2i, list: Array[Vector2i]) -> bool:
 	for entry in list:
 		if entry == cell:
 			return true
 	return false
+
+func is_pebble_at(cell: Vector2i) -> bool:
+	return is_cell_in_list(cell, pebble_cells)
+
+func is_rotten_bean_at(cell: Vector2i) -> bool:
+	return is_cell_in_list(cell, rotten_bean_cells)
+
+func is_broken_bean_at(cell: Vector2i) -> bool:
+	return is_cell_in_list(cell, broken_bean_cells)
+
+func remove_vector2i_from_list(cell: Vector2i, list: Array[Vector2i]) -> bool:
+	for i: int in range(list.size()):
+		if list[i] == cell:
+			list.remove_at(i)
+			return true
+	return false
+
+func remove_rotten_bean_at(cell: Vector2i) -> bool:
+	return remove_vector2i_from_list(cell, rotten_bean_cells)
+
+func remove_broken_bean_at(cell: Vector2i) -> bool:
+	return remove_vector2i_from_list(cell, broken_bean_cells)
+
+func has_index(indices: Array[int], idx: int) -> bool:
+	for existing in indices:
+		if existing == idx:
+			return true
+	return false
+
+func add_index_unique(indices: Array[int], idx: int) -> void:
+	if idx < 0:
+		return
+	if not has_index(indices, idx):
+		indices.append(idx)
+
+func prune_segment_indices() -> void:
+	for i: int in range(broken_segment_indices.size() - 1, -1, -1):
+		var idx := broken_segment_indices[i]
+		if idx < 0 or idx >= snake.size():
+			broken_segment_indices.remove_at(i)
+	for j: int in range(rotten_segment_indices.size() - 1, -1, -1):
+		var ridx := rotten_segment_indices[j]
+		if ridx < 0 or ridx >= snake.size():
+			rotten_segment_indices.remove_at(j)
+	for k: int in range(decaf_segment_indices.size() - 1, -1, -1):
+		var didx := decaf_segment_indices[k]
+		if didx < 0 or didx >= snake.size():
+			decaf_segment_indices.remove_at(k)
+
+func shift_segment_indices(delta: int) -> void:
+	for i: int in range(broken_segment_indices.size()):
+		broken_segment_indices[i] += delta
+	for j: int in range(rotten_segment_indices.size()):
+		rotten_segment_indices[j] += delta
+	for k: int in range(decaf_segment_indices.size()):
+		decaf_segment_indices[k] += delta
+	prune_segment_indices()
+
+func infect_nearest_chain_beans(count: int) -> void:
+	var added := 0
+	for idx: int in range(1, snake.size()):
+		if not has_index(rotten_segment_indices, idx):
+			rotten_segment_indices.append(idx)
+			added += 1
+			if added >= count:
+				break
+
+func spread_rotten_infection() -> void:
+	if rotten_segment_indices.is_empty():
+		return
+	var pending: Array[int] = []
+	for idx in rotten_segment_indices:
+		var left := idx - 1
+		var right := idx + 1
+		if left >= 1 and left < snake.size() and not has_index(rotten_segment_indices, left):
+			add_index_unique(pending, left)
+		if right >= 1 and right < snake.size() and not has_index(rotten_segment_indices, right):
+			add_index_unique(pending, right)
+	for idx in pending:
+		add_index_unique(rotten_segment_indices, idx)
 
 func is_on_conveyor(cell: Vector2i) -> bool:
 	return conveyor_cells.has(cell)
@@ -302,6 +524,7 @@ func scatter_chain_from_index(start_index: int) -> void:
 			spawn_wake_pulse(bean)
 
 	snake.resize(start_index)
+	prune_segment_indices()
 	freshness = maxf(0.0, freshness - float(detached_count) * CHAIN_SCATTER_FRESHNESS_LOSS)
 	if freshness <= 0.0:
 		trigger_game_over()
@@ -325,15 +548,6 @@ func apply_conveyor_push() -> void:
 		if in_bounds(pushed) and not (piston_active_left > 0.0 and pushed.y == piston_row):
 			snake[i] = pushed
 
-	for i: int in range(idle_beans.size()):
-		var bean := idle_beans[i]
-		if not is_on_conveyor(bean):
-			continue
-		var dir := conveyor_dir_for(bean)
-		var pushed := bean + dir
-		if in_bounds(pushed) and not is_grinder_cell(pushed):
-			idle_beans[i] = pushed
-
 func trigger_piston_telegraph() -> void:
 	piston_row = rng.randi_range(2, GRID_SIZE.y - 3)
 	piston_telegraph_left = PISTON_TELEGRAPH_SEC
@@ -346,6 +560,184 @@ func trigger_piston_slam() -> void:
 		if snake[i].y == piston_row:
 			scatter_chain_from_index(i)
 			return
+
+func remove_tail_beans(count: int, freshness_per_bean: float) -> void:
+	var removed := 0
+	while removed < count and snake.size() > 1:
+		snake.pop_back()
+		removed += 1
+	prune_segment_indices()
+	if removed > 0:
+		freshness = maxf(0.0, freshness - freshness_per_bean * float(removed))
+		if freshness <= 0.0:
+			trigger_game_over()
+
+func apply_decaf_hit() -> void:
+	if snake.is_empty():
+		return
+	var head := snake[0]
+	for i: int in range(decaf_beans.size()):
+		var cell: Vector2i = decaf_beans[i]["cell"]
+		if cell != head:
+			continue
+		var converted := 0
+		for idx: int in range(1, snake.size()):
+			if not has_index(decaf_segment_indices, idx):
+				decaf_segment_indices.append(idx)
+				converted += 1
+				if converted >= 3:
+					break
+			extraction_feedback = "Decaf spread"
+			extraction_feedback_ttl = 1.0
+			break
+
+func update_decaf_beans(delta: float) -> void:
+	decaf_move_timer -= delta
+	if decaf_move_timer > 0.0:
+		return
+	decaf_move_timer += DECAF_MOVE_INTERVAL
+	for i: int in range(decaf_beans.size()):
+		var cell: Vector2i = decaf_beans[i]["cell"]
+		var dir: Vector2i = decaf_beans[i]["dir"]
+		var next := cell + dir
+		if not in_bounds(next) or is_pebble_at(next) or is_grinder_cell(next):
+			dir = random_cardinal_dir()
+			next = cell + dir
+			if not in_bounds(next) or is_pebble_at(next) or is_grinder_cell(next):
+				next = cell
+		decaf_beans[i]["dir"] = dir
+		decaf_beans[i]["cell"] = next
+
+func update_water_drops(delta: float) -> void:
+	water_drop_move_timer -= delta
+	if water_drop_move_timer > 0.0:
+		return
+	water_drop_move_timer += WATER_DROP_MOVE_INTERVAL
+	for i: int in range(water_drops.size()):
+		var cell: Vector2i = water_drops[i]["cell"]
+		var dir: Vector2i = water_drops[i]["dir"]
+		var next := cell + dir
+		if not in_bounds(next) or is_pebble_at(next):
+			if next.x < 0 or next.x >= GRID_SIZE.x:
+				dir.x = -dir.x
+			if next.y < 0 or next.y >= GRID_SIZE.y:
+				dir.y = -dir.y
+			if is_pebble_at(next):
+				dir = random_cardinal_dir()
+			next = cell + dir
+			if not in_bounds(next) or is_pebble_at(next):
+				next = cell
+		water_drops[i]["dir"] = dir
+		water_drops[i]["cell"] = next
+
+func apply_water_drop_hits() -> void:
+	if snake.is_empty():
+		return
+	var head := snake[0]
+	for drop in water_drops:
+		var cell: Vector2i = drop["cell"]
+		if cell == head:
+			remove_tail_beans(rng.randi_range(1, 2), ENEMY_BEAN_LOSS_FRESHNESS)
+			extraction_feedback = "Water hit"
+			extraction_feedback_ttl = 1.0
+			return
+
+func apply_scoop_effect() -> void:
+	if scoop_center.x < 0 or snake.is_empty():
+		return
+	var center_v := Vector2(scoop_center.x + 0.5, scoop_center.y + 0.5)
+	var to_remove: Array[int] = []
+	for idx: int in range(snake.size()):
+		var seg := snake[idx]
+		var seg_v := Vector2(seg.x + 0.5, seg.y + 0.5)
+		if center_v.distance_to(seg_v) <= SCOOP_RADIUS_CELLS:
+			to_remove.append(idx)
+
+	if to_remove.is_empty():
+		return
+	if has_index(to_remove, 0):
+		trigger_game_over()
+		return
+
+	to_remove.sort()
+	var removed := 0
+	for i: int in range(to_remove.size() - 1, -1, -1):
+		snake.remove_at(to_remove[i])
+		removed += 1
+	prune_segment_indices()
+	if removed > 0:
+		freshness = maxf(0.0, freshness - ENEMY_BEAN_LOSS_FRESHNESS * float(removed))
+		extraction_feedback = "Scooped"
+		extraction_feedback_ttl = 1.0
+		if freshness <= 0.0:
+			trigger_game_over()
+
+func update_scoop(delta: float) -> void:
+	if scoop_telegraph_left > 0.0:
+		scoop_telegraph_left = maxf(0.0, scoop_telegraph_left - delta)
+		if scoop_telegraph_left <= 0.0:
+			apply_scoop_effect()
+			scoop_center = Vector2i(-1, -1)
+			scoop_timer = SCOOP_INTERVAL
+		return
+
+	scoop_timer -= delta
+	if scoop_timer <= 0.0:
+		scoop_timer += SCOOP_INTERVAL
+		scoop_telegraph_left = SCOOP_TELEGRAPH_SEC
+		scoop_center = Vector2i(
+			rng.randi_range(2, GRID_SIZE.x - 3),
+			rng.randi_range(2, GRID_SIZE.y - 3)
+		)
+
+func apply_mechanical_arm_push() -> void:
+	if arm_line_index < 0:
+		return
+	for i: int in range(snake.size()):
+		var seg := snake[i]
+		var on_line := (arm_is_row and seg.y == arm_line_index) or ((not arm_is_row) and seg.x == arm_line_index)
+		if not on_line:
+			continue
+		var pushed := seg
+		for _j: int in range(ARM_PUSH_CELLS):
+			var next := pushed + arm_push_dir
+			if not in_bounds(next):
+				break
+			pushed = next
+		snake[i] = pushed
+
+func update_mechanical_arm(delta: float) -> void:
+	if arm_active_left > 0.0:
+		arm_active_left = maxf(0.0, arm_active_left - delta)
+		if not arm_applied:
+			apply_mechanical_arm_push()
+			arm_applied = true
+		if arm_active_left <= 0.0:
+			arm_line_index = -1
+		return
+
+	if arm_telegraph_left > 0.0:
+		arm_telegraph_left = maxf(0.0, arm_telegraph_left - delta)
+		if arm_telegraph_left <= 0.0:
+			arm_active_left = ARM_ACTIVE_SEC
+			arm_applied = false
+		return
+
+	arm_timer -= delta
+	if arm_timer <= 0.0:
+		arm_timer += ARM_INTERVAL
+		arm_telegraph_left = ARM_TELEGRAPH_SEC
+		arm_is_row = rng.randi_range(0, 1) == 0
+		arm_line_index = rng.randi_range(2, (GRID_SIZE.y - 3) if arm_is_row else (GRID_SIZE.x - 3))
+		arm_push_dir = random_cardinal_dir()
+		if arm_is_row:
+			arm_push_dir.y = 0
+			if arm_push_dir.x == 0:
+				arm_push_dir.x = 1
+		else:
+			arm_push_dir.x = 0
+			if arm_push_dir.y == 0:
+				arm_push_dir.y = 1
 
 func extraction_multiplier(seconds: float) -> float:
 	if seconds <= 15.0:
@@ -400,6 +792,7 @@ func trigger_rally_call() -> void:
 	rally_cooldown_left = RALLY_COOLDOWN_SEC
 	var head := snake[0]
 	var recruited: Array[Vector2i] = []
+	var recruited_broken: Array[Vector2i] = []
 	for i: int in range(idle_beans.size() - 1, -1, -1):
 		var bean := idle_beans[i]
 		if head.distance_to(bean) <= RALLY_RADIUS_CELLS:
@@ -407,8 +800,17 @@ func trigger_rally_call() -> void:
 			bean_spawn_age.erase(bean_key(bean))
 			recruited.append(bean)
 			spawn_wake_pulse(bean)
+	for j: int in range(broken_bean_cells.size() - 1, -1, -1):
+		var broken := broken_bean_cells[j]
+		if head.distance_to(broken) <= RALLY_RADIUS_CELLS:
+			broken_bean_cells.remove_at(j)
+			recruited_broken.append(broken)
+			spawn_wake_pulse(broken)
 	for bean in recruited:
 		snake.append(bean)
+	for broken in recruited_broken:
+		snake.append(broken)
+		add_index_unique(broken_segment_indices, snake.size() - 1)
 
 func trigger_burr_rotation() -> void:
 	var phases: Array[Vector2i] = [Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT, Vector2i.UP]
@@ -426,24 +828,16 @@ func trigger_burr_rotation() -> void:
 		pushed_snake.append(new_seg)
 	snake = pushed_snake
 
-	var occupied := {}
-	for seg in snake:
-		occupied[seg] = true
-
-	for i: int in range(idle_beans.size()):
-		var bean := idle_beans[i]
-		var moved := bean
-		for _j: int in range(2):
-			var next := moved + push_dir
-			if not in_bounds(next):
-				break
-			moved = next
-		if not occupied.has(moved):
-			idle_beans[i] = moved
-			occupied[moved] = true
-
 func can_spawn_leader(cell: Vector2i) -> bool:
-	return in_bounds(cell) and is_inside_spawn_safe_area(cell) and not is_grinder_cell(cell) and not is_idle_bean_at(cell)
+	return (
+		in_bounds(cell)
+		and is_inside_spawn_safe_area(cell)
+		and not is_grinder_cell(cell)
+		and not is_idle_bean_at(cell)
+		and not is_pebble_at(cell)
+		and not is_rotten_bean_at(cell)
+		and not is_broken_bean_at(cell)
+	)
 
 func is_inside_spawn_safe_area(cell: Vector2i) -> bool:
 	return (
@@ -474,6 +868,8 @@ func find_leader_spawn_cell() -> Vector2i:
 func spawn_new_leader_bean() -> void:
 	var spawn_cell := find_leader_spawn_cell()
 	snake.clear()
+	broken_segment_indices.clear()
+	rotten_segment_indices.clear()
 	snake.append(spawn_cell)
 	var directions: Array[Vector2i] = [Vector2i.UP, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT]
 	var random_dir: Vector2i = directions[rng.randi_range(0, directions.size() - 1)]
@@ -521,11 +917,15 @@ func process_grind(delta: float) -> void:
 			spawn_new_leader_bean()
 			return
 
+		var consumed_broken := has_index(broken_segment_indices, 0)
 		var consumed: Vector2i = snake.pop_front()
+		shift_segment_indices(-1)
 		if grind_grounded_count < GRINDER_DOSE_CAP:
 			spawn_grind_pop(consumed)
 			grind_grounded_count += 1
 			score += 2
+			if consumed_broken:
+				score -= 1
 			best_score = max(best_score, score)
 			freshness = minf(FRESHNESS_MAX, freshness + GROUND_FRESHNESS_GAIN)
 		else:
@@ -602,6 +1002,12 @@ func spawn_idle_beans(count: int) -> void:
 		occupied[bean] = true
 	for grinder_cell in get_grinder_cells():
 		occupied[grinder_cell] = true
+	for pebble in pebble_cells:
+		occupied[pebble] = true
+	for rotten in rotten_bean_cells:
+		occupied[rotten] = true
+	for broken in broken_bean_cells:
+		occupied[broken] = true
 
 	var spawned := 0
 	var attempts := 0
@@ -762,6 +1168,16 @@ func try_set_direction(candidate: Vector2i) -> void:
 		return
 	if candidate == -direction:
 		return
+	if candidate != next_direction:
+		if shake_combo_window_left > 0.0:
+			shake_combo_count += 1
+		else:
+			shake_combo_count = 1
+		shake_combo_window_left = SHAKE_PURGE_WINDOW_SEC
+		if shake_combo_count >= SHAKE_PURGE_TURNS and not rotten_segment_indices.is_empty():
+			rotten_segment_indices.clear()
+			extraction_feedback = "Rot purged"
+			extraction_feedback_ttl = 1.1
 	next_direction = candidate
 
 func _physics_process(delta: float) -> void:
@@ -796,6 +1212,15 @@ func _physics_process(delta: float) -> void:
 		apply_conveyor_push()
 
 	oil_slick_timer = maxf(0.0, oil_slick_timer - delta)
+	shake_combo_window_left = maxf(0.0, shake_combo_window_left - delta)
+	if shake_combo_window_left <= 0.0:
+		shake_combo_count = 0
+
+	if not rotten_segment_indices.is_empty():
+		rotten_spread_timer -= delta
+		if rotten_spread_timer <= 0.0:
+			rotten_spread_timer += ROTTEN_SPREAD_INTERVAL
+			spread_rotten_infection()
 
 	if piston_active_left > 0.0:
 		piston_active_left = maxf(0.0, piston_active_left - delta)
@@ -860,6 +1285,8 @@ func is_cell_blocked(cell: Vector2i, _grows: bool) -> bool:
 		return true
 	if piston_active_left > 0.0 and piston_row >= 0 and cell.y == piston_row:
 		return true
+	if is_pebble_at(cell):
+		return true
 	return false
 
 func reflected_direction(current_dir: Vector2i, grows: bool) -> Vector2i:
@@ -897,17 +1324,26 @@ func step_game() -> void:
 		return
 
 	direction = next_direction
-	var grows := is_idle_bean_at(snake[0] + direction)
+	var target := snake[0] + direction
+	var grows_idle := is_idle_bean_at(target)
+	var grows_broken := is_broken_bean_at(target)
+	var grows := grows_idle or grows_broken
 	var new_head := snake[0] + direction
+	var blocked_by_pebble := is_pebble_at(new_head)
 
 	if is_cell_blocked(new_head, grows):
+		if blocked_by_pebble and snake.size() > 1:
+			scatter_on_hazard_contact()
 		var bounced_dir := reflected_direction(direction, grows)
 		if bounced_dir == Vector2i.ZERO:
 			queue_redraw()
 			return
 		direction = bounced_dir
 		next_direction = bounced_dir
-		grows = is_idle_bean_at(snake[0] + direction)
+		target = snake[0] + direction
+		grows_idle = is_idle_bean_at(target)
+		grows_broken = is_broken_bean_at(target)
+		grows = grows_idle or grows_broken
 		new_head = snake[0] + direction
 
 		if is_cell_blocked(new_head, grows):
@@ -915,6 +1351,7 @@ func step_game() -> void:
 			return
 
 	snake.push_front(new_head)
+	shift_segment_indices(1)
 
 	if grinder_active and is_grinder_cell(new_head):
 		# Preserve normal movement length before grind starts.
@@ -930,10 +1367,20 @@ func step_game() -> void:
 
 	if grows:
 		move_interval = max(0.07, move_interval - 0.0025)
-		remove_idle_bean_at(new_head)
+		if grows_idle:
+			remove_idle_bean_at(new_head)
+		if grows_broken:
+			remove_broken_bean_at(new_head)
+			add_index_unique(broken_segment_indices, snake.size() - 1)
 		spawn_wake_pulse(new_head)
 	else:
 		snake.pop_back()
+		prune_segment_indices()
+
+	if is_rotten_bean_at(new_head):
+		remove_rotten_bean_at(new_head)
+		infect_nearest_chain_beans(2)
+		spawn_wake_pulse(new_head)
 
 	if is_cell_in_list(new_head, grinding_teeth_cells):
 		scatter_on_hazard_contact()
@@ -999,12 +1446,34 @@ func _draw() -> void:
 	draw_grid()
 	draw_machine_hazards()
 	draw_grinder()
+	draw_ingredient_hazards()
 	draw_idle_beans()
 	draw_snake()
 	draw_grind_pops()
 	draw_waste_spills()
 	draw_wake_pulses()
 	draw_hud()
+
+func draw_ingredient_hazards() -> void:
+	for pebble in pebble_cells:
+		var pp := grid_to_pixel(pebble)
+		draw_circle(pp + Vector2(CELL_SIZE * 0.32, CELL_SIZE * 0.58), 5.2, Color("6e7377"))
+		draw_circle(pp + Vector2(CELL_SIZE * 0.56, CELL_SIZE * 0.50), 6.5, Color("85898c"))
+		draw_circle(pp + Vector2(CELL_SIZE * 0.72, CELL_SIZE * 0.62), 4.6, Color("666b70"))
+
+	for rotten in rotten_bean_cells:
+		var rp := grid_to_pixel(rotten)
+		draw_coffee_bean(rp, Color("3f4a2a"), Color("6e8a44"), Color("222813"))
+		var mark := rp + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.45)
+		draw_line(mark + Vector2(-3, -3), mark + Vector2(3, 3), Color("b4d176"), 1.0)
+		draw_line(mark + Vector2(-3, 3), mark + Vector2(3, -3), Color("b4d176"), 1.0)
+
+	for broken in broken_bean_cells:
+		var bp := grid_to_pixel(broken)
+		draw_coffee_bean(bp, Color("8b5a36"), Color("c88a55"), Color("351f12"))
+		var crack := bp + Vector2(CELL_SIZE * 0.48, CELL_SIZE * 0.28)
+		draw_line(crack + Vector2(-2, 0), crack + Vector2(2, 4), Color("f0d3ac"), 1.2)
+		draw_line(crack + Vector2(2, 4), crack + Vector2(-1, 8), Color("f0d3ac"), 1.2)
 
 func draw_machine_hazards() -> void:
 	var time_phase := float(Time.get_ticks_msec()) * 0.001
@@ -1305,6 +1774,10 @@ func draw_snake() -> void:
 		var body_color := COLOR_SNAKE_HEAD if i == 0 else COLOR_SNAKE_BODY
 		var highlight := COLOR_SNAKE_HIGHLIGHT if i == 0 else COLOR_COPPER
 		var seam_color := Color("2f1c11") if i == 0 else Color("3a2416")
+		if i > 0 and has_index(rotten_segment_indices, i):
+			body_color = Color("4b5a2f")
+			highlight = Color("7f9e4b")
+			seam_color = Color("273016")
 
 		draw_coffee_bean(top_left, body_color, highlight, seam_color)
 
