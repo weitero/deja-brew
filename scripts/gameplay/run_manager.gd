@@ -32,7 +32,7 @@ const BEAN_SPAWN_APPEAR := 0.10
 const BEAN_SPAWN_BOUNCE := 0.14
 const BEAN_SPAWN_SETTLE := 0.08
 const BEAN_SPAWN_TOTAL := BEAN_SPAWN_SHADOW + BEAN_SPAWN_APPEAR + BEAN_SPAWN_BOUNCE + BEAN_SPAWN_SETTLE
-const GRINDER_SIZE := 2
+var grinder_size: int = 2
 const GRINDER_TELEGRAPH_TIME := 2.0
 const GRINDER_RELOCATE_INTERVAL := 5.0
 const GRIND_POP_LIFE := 0.20
@@ -75,6 +75,14 @@ const ARM_TELEGRAPH_SEC := 1.0
 const ARM_ACTIVE_SEC := 0.8
 const ARM_PUSH_CELLS := 2
 
+## Water puddles (L2+)
+const WASHED_BUFF_DURATION        := 10.0   ## seconds the Washed ×1.5 buff lasts
+const WATER_WASHED_SCORE_MULT     := 1.5
+const WATER_EXPOSURE_LIMIT        := 2.0    ## seconds in water before bean loss
+## Pressure Release (L3)
+const PRESSURE_RELEASE_TELEGRAPH_SEC := 2.0
+const PRESSURE_RELEASE_PUSH_CELLS   := 2
+
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
 
@@ -102,7 +110,8 @@ enum GameState {
 	START_MENU,
 	PLAYING,
 	PAUSED,
-	GAME_OVER
+	GAME_OVER,
+	LEVEL_COMPLETE,
 }
 
 var game_state: GameState = GameState.START_MENU
@@ -168,7 +177,42 @@ var arm_line_index := -1
 var arm_push_dir := Vector2i.RIGHT
 var arm_applied := false
 
+## Level / wave integration ------------------------------------------------
+const WaveManagerScript = preload("res://scripts/gameplay/wave_manager.gd")
+@export var level_id: String = "level_1_hopper"
+var wave_mgr: WaveManagerScript
+## Runtime flags driven by the active level config.
+var extraction_timer_enabled: bool = true
+var piston_enabled: bool = true
+var machine_hazards_enabled: bool = true
+var ingredient_hazards_enabled: bool = true
+var enemies_enabled: bool = true
+## Trickle count is updated each time a new wave starts.
+var current_trickle_per_rotation: int = 2
+## Runtime flags for L2/L3 mechanics.
+var water_puddles_enabled: bool = false
+var pressure_release_enabled: bool = false
+## Per-level machine-cycle intervals (set by _apply_level_config).
+var active_burr_interval: float = BURR_ROTATION_INTERVAL
+var active_piston_interval: float = PISTON_INTERVAL
+var active_pressure_interval: float = 15.0
+## Water puddle state.
+var water_puddle_cells: Array[Vector2i] = []
+var washed_buff_timer: float = 0.0
+var water_exposure_timer: float = 0.0
+## Pressure-release state.
+var pressure_release_timer: float = 0.0
+var pressure_release_telegraph_timer: float = 0.0
+var pressure_vent_side: int = 0   ## 0=left→R  1=right→L  2=top→D  3=bottom→U
+## Mid-wave blade relocation: 0=none  -1=every 15 s  N=N remaining relocations.
+var mid_wave_relocations_remaining: int = 0
+
 func _ready() -> void:
+	wave_mgr = WaveManagerScript.new()
+	wave_mgr.wave_started.connect(_on_wave_started)
+	wave_mgr.wave_completed.connect(_on_wave_completed)
+	wave_mgr.level_cleared.connect(_on_level_cleared)
+	wave_mgr.init(level_id)
 	rng.randomize()
 	load_high_score()
 	hud_font = ThemeDB.fallback_font
@@ -259,7 +303,6 @@ func save_high_score_if_needed() -> void:
 
 func start_new_run() -> void:
 	score = 0
-	move_interval = 0.13
 	move_accumulator = 0.0
 	freshness = FRESHNESS_MAX
 	time_alive = 0.0
@@ -274,16 +317,21 @@ func start_new_run() -> void:
 	next_direction = Vector2i.RIGHT
 	idle_beans.clear()
 	bean_spawn_age.clear()
+
+	# Apply level-specific config before placing the grinder or hazards.
+	wave_mgr.init(level_id)
+	_apply_level_config()
+
 	place_grinder_random()
 	setup_machine_hazards()
 	setup_ingredient_hazards()
 	setup_enemy_hazards()
-	spawn_idle_beans(rng.randi_range(8, 15))
+	# Initial beans are spawned by _on_wave_started when wave_mgr.begin_level() fires.
 	bean_spawn_timer = 0.0
 	grinder_angle = 0.0
 	grinder_active = false
 	grinder_telegraph_timer = GRINDER_TELEGRAPH_TIME
-	grinder_relocate_timer = GRINDER_RELOCATE_INTERVAL
+	grinder_relocate_timer = 999999.0      ## wave_mgr sets the real value via _on_wave_started
 	is_grinding = false
 	grind_step_timer = 0.0
 	grind_pops.clear()
@@ -297,11 +345,11 @@ func start_new_run() -> void:
 	extraction_base_score = 0
 	extraction_feedback = ""
 	extraction_feedback_ttl = 0.0
-	burr_timer = BURR_ROTATION_INTERVAL
+	burr_timer = active_burr_interval
 	burr_phase_index = 0
 	conveyor_push_timer = CONVEYOR_PUSH_INTERVAL
 	oil_slick_timer = 0.0
-	piston_timer = PISTON_INTERVAL
+	piston_timer = active_piston_interval
 	piston_telegraph_left = 0.0
 	piston_active_left = 0.0
 	piston_row = -1
@@ -324,6 +372,16 @@ func start_new_run() -> void:
 	arm_push_dir = Vector2i.RIGHT
 	arm_applied = false
 	wake_pulses.clear()
+	water_puddle_cells.clear()
+	washed_buff_timer            = 0.0
+	water_exposure_timer         = 0.0
+	pressure_release_timer       = 0.0
+	pressure_release_telegraph_timer = 0.0
+	pressure_vent_side           = 0
+	mid_wave_relocations_remaining = 0
+
+	# Begin the first wave — fires wave_started signal which spawns the initial batch.
+	wave_mgr.begin_level()
 	queue_redraw()
 
 func random_inner_cell(occupied: Dictionary) -> Vector2i:
@@ -342,6 +400,9 @@ func setup_machine_hazards() -> void:
 	gear_gap_cells.clear()
 	oil_slick_cells.clear()
 	conveyor_cells.clear()
+
+	if not machine_hazards_enabled:
+		return
 
 	var occupied := {}
 	for cell in get_grinder_cells():
@@ -366,6 +427,9 @@ func setup_ingredient_hazards() -> void:
 	pebble_cells.clear()
 	rotten_bean_cells.clear()
 	broken_bean_cells.clear()
+
+	if not ingredient_hazards_enabled:
+		return
 
 	var occupied := {}
 	for cell in get_grinder_cells():
@@ -393,6 +457,9 @@ func random_cardinal_dir() -> Vector2i:
 func setup_enemy_hazards() -> void:
 	decaf_beans.clear()
 	water_drops.clear()
+
+	if not enemies_enabled:
+		return
 
 	var occupied := {}
 	for cell in get_grinder_cells():
@@ -769,12 +836,13 @@ func extraction_label(seconds: float) -> String:
 func finalize_extraction(auto_pull: bool) -> void:
 	if not extraction_active:
 		return
-	var mult := extraction_multiplier(extraction_timer)
+	# Level 1 has no extraction timing pressure — always pulls at ×1.0.
+	var mult := 1.0 if not extraction_timer_enabled else extraction_multiplier(extraction_timer)
 	var final_score := int(round(float(extraction_base_score) * mult))
 	var delta := final_score - extraction_base_score
 	score += delta
 	best_score = max(best_score, score)
-	
+
 	if mult == 1.0 and extraction_base_score == 36:
 		performance_score += 5
 		score += 500
@@ -782,7 +850,7 @@ func finalize_extraction(auto_pull: bool) -> void:
 		extraction_feedback = "GOD SHOT!"
 	else:
 		extraction_feedback = extraction_label(extraction_timer)
-		
+
 	update_adaptive_difficulty()
 	extraction_feedback_ttl = 1.8
 	if auto_pull:
@@ -939,9 +1007,10 @@ func process_grind(delta: float) -> void:
 		if grind_grounded_count < GRINDER_DOSE_CAP:
 			spawn_grind_pop(consumed)
 			grind_grounded_count += 1
-			score += 2
+			var grind_pts: int = int(round(2.0 * (WATER_WASHED_SCORE_MULT if washed_buff_timer > 0.0 else 1.0)))
 			if consumed_broken:
-				score -= 1
+				grind_pts = maxi(1, grind_pts - 1)
+			score += grind_pts
 			best_score = max(best_score, score)
 			freshness = minf(FRESHNESS_MAX, freshness + GROUND_FRESHNESS_GAIN)
 		else:
@@ -957,13 +1026,13 @@ func process_grind(delta: float) -> void:
 		if snake.is_empty():
 			is_grinding = false
 			begin_extraction_from_grind(grind_grounded_count)
-			
+
 			if grind_grounded_count == GRINDER_DOSE_CAP:
 				performance_score += 1
 			if grind_wasted_count > 0:
 				performance_score -= (grind_wasted_count / 3)
 			update_adaptive_difficulty()
-			
+
 			grind_grounded_count = 0
 			grind_wasted_count = 0
 			spawn_new_leader_bean()
@@ -1055,8 +1124,8 @@ func get_grinder_cells() -> Array[Vector2i]:
 	var cells: Array[Vector2i] = []
 	if grinder_origin.x < 0 or grinder_origin.y < 0:
 		return cells
-	for y: int in range(GRINDER_SIZE):
-		for x: int in range(GRINDER_SIZE):
+	for y: int in range(grinder_size):
+		for x: int in range(grinder_size):
 			cells.append(grinder_origin + Vector2i(x, y))
 	return cells
 
@@ -1066,8 +1135,8 @@ func is_grinder_cell(cell: Vector2i) -> bool:
 	return (
 		cell.x >= grinder_origin.x
 		and cell.y >= grinder_origin.y
-		and cell.x < grinder_origin.x + GRINDER_SIZE
-		and cell.y < grinder_origin.y + GRINDER_SIZE
+		and cell.x < grinder_origin.x + grinder_size
+		and cell.y < grinder_origin.y + grinder_size
 	)
 
 func place_grinder_random(previous_origin: Vector2i = Vector2i(-1, -1)) -> void:
@@ -1076,12 +1145,12 @@ func place_grinder_random(previous_origin: Vector2i = Vector2i(-1, -1)) -> void:
 	while tries < max_tries:
 		tries += 1
 		var candidate := Vector2i(
-			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.x - GRINDER_SIZE - PLAYFIELD_SAFE_MARGIN),
-			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.y - GRINDER_SIZE - PLAYFIELD_SAFE_MARGIN)
+			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.x - grinder_size - PLAYFIELD_SAFE_MARGIN),
+			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.y - grinder_size - PLAYFIELD_SAFE_MARGIN)
 		)
 		var overlaps := false
-		for y: int in range(GRINDER_SIZE):
-			for x: int in range(GRINDER_SIZE):
+		for y: int in range(grinder_size):
+			for x: int in range(grinder_size):
 				var cell := candidate + Vector2i(x, y)
 				if snake.has(cell) or is_idle_bean_at(cell):
 					overlaps = true
@@ -1089,8 +1158,8 @@ func place_grinder_random(previous_origin: Vector2i = Vector2i(-1, -1)) -> void:
 				if previous_origin.x >= 0 and previous_origin.y >= 0 and (
 					cell.x >= previous_origin.x
 					and cell.y >= previous_origin.y
-					and cell.x < previous_origin.x + GRINDER_SIZE
-					and cell.y < previous_origin.y + GRINDER_SIZE
+					and cell.x < previous_origin.x + grinder_size
+						and cell.y < previous_origin.y + grinder_size
 				):
 					overlaps = true
 					break
@@ -1131,6 +1200,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif game_state == GameState.START_MENU:
 				get_tree().quit()
 				return
+			elif game_state == GameState.LEVEL_COMPLETE:
+				game_state = GameState.START_MENU
+				return
 
 		if game_state == GameState.PAUSED:
 			if key_event.keycode == KEY_UP or key_event.keycode == KEY_W:
@@ -1146,6 +1218,15 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 
 		if game_state == GameState.GAME_OVER:
+			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
+				start_new_run()
+				game_state = GameState.PLAYING
+				return
+			if key_event.keycode == KEY_ESCAPE:
+				game_state = GameState.START_MENU
+				return
+
+		if game_state == GameState.LEVEL_COMPLETE:
 			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
 				start_new_run()
 				game_state = GameState.PLAYING
@@ -1209,12 +1290,35 @@ func _physics_process(delta: float) -> void:
 	if game_state != GameState.PLAYING:
 		return
 
+	# Always advance the wave manager timer so banners expire on schedule.
+	wave_mgr.update(delta)
+
+	# While a wave banner (start/end/level-clear) is displayed, freeze all
+	# gameplay logic — no movement, no freshness drain, no hazard ticks.
+	if wave_mgr.is_in_banner():
+		queue_redraw()
+		return
+
+	# Level fully complete — transition to the level-complete screen.
+	if wave_mgr.is_done():
+		game_state = GameState.LEVEL_COMPLETE
+		best_score  = max(best_score, score)
+		save_high_score_if_needed()
+		queue_redraw()
+		return
+
 	if resume_countdown_left > 0.0:
 		resume_countdown_left = maxf(0.0, resume_countdown_left - delta)
 		queue_redraw()
 		return
 
 	time_alive += delta
+
+	# Washed buff decays each frame.  The buff itself is granted in step_game()
+	# when the leader actually steps onto a puddle cell.
+	washed_buff_timer = maxf(0.0, washed_buff_timer - delta)
+
+
 	freshness = maxf(0.0, freshness - FRESHNESS_DRAIN_PER_SEC * delta)
 	if freshness <= 0.0:
 		trigger_game_over()
@@ -1228,13 +1332,14 @@ func _physics_process(delta: float) -> void:
 
 	burr_timer -= delta
 	if burr_timer <= 0.0:
-		burr_timer += BURR_ROTATION_INTERVAL
+		burr_timer += active_burr_interval
 		trigger_burr_rotation()
 
-	conveyor_push_timer -= delta
-	if conveyor_push_timer <= 0.0:
-		conveyor_push_timer += CONVEYOR_PUSH_INTERVAL
-		apply_conveyor_push()
+	if machine_hazards_enabled:
+		conveyor_push_timer -= delta
+		if conveyor_push_timer <= 0.0:
+			conveyor_push_timer += CONVEYOR_PUSH_INTERVAL
+			apply_conveyor_push()
 
 	oil_slick_timer = maxf(0.0, oil_slick_timer - delta)
 	shake_combo_window_left = maxf(0.0, shake_combo_window_left - delta)
@@ -1247,17 +1352,38 @@ func _physics_process(delta: float) -> void:
 			rotten_spread_timer += ROTTEN_SPREAD_INTERVAL
 			spread_rotten_infection()
 
-	if piston_active_left > 0.0:
-		piston_active_left = maxf(0.0, piston_active_left - delta)
-	elif piston_telegraph_left > 0.0:
-		piston_telegraph_left = maxf(0.0, piston_telegraph_left - delta)
-		if piston_telegraph_left <= 0.0:
-			trigger_piston_slam()
-	else:
-		piston_timer -= delta
-		if piston_timer <= 0.0:
-			piston_timer += PISTON_INTERVAL
-			trigger_piston_telegraph()
+	if piston_enabled:
+		if piston_active_left > 0.0:
+			piston_active_left = maxf(0.0, piston_active_left - delta)
+		elif piston_telegraph_left > 0.0:
+			piston_telegraph_left = maxf(0.0, piston_telegraph_left - delta)
+			if piston_telegraph_left <= 0.0:
+				trigger_piston_slam()
+		else:
+			piston_timer -= delta
+			if piston_timer <= 0.0:
+				piston_timer += active_piston_interval
+				trigger_piston_telegraph()
+
+	if enemies_enabled:
+		update_decaf_beans(delta)
+		apply_decaf_hit()
+		update_water_drops(delta)
+		apply_water_drop_hits()
+		update_scoop(delta)
+		update_mechanical_arm(delta)
+
+	# Pressure Release — L3 only.
+	if pressure_release_enabled:
+		if pressure_release_telegraph_timer > 0.0:
+			pressure_release_telegraph_timer = maxf(0.0, pressure_release_telegraph_timer - delta)
+			if pressure_release_telegraph_timer <= 0.0:
+				apply_pressure_release()
+				pressure_release_timer = active_pressure_interval
+		else:
+			pressure_release_timer -= delta
+			if pressure_release_timer <= 0.0:
+				trigger_pressure_release_telegraph()
 
 	var steer_axis := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	if steer_axis.length() > 0.0:
@@ -1279,17 +1405,27 @@ func _physics_process(delta: float) -> void:
 		if grinder_telegraph_timer <= 0.0:
 			grinder_active = true
 	else:
-		grinder_relocate_timer = maxf(0.0, grinder_relocate_timer - delta)
-		if grinder_relocate_timer <= 0.0:
-			var previous_origin := grinder_origin
-			grinder_active = false
-			grinder_telegraph_timer = GRINDER_TELEGRAPH_TIME
-			grinder_relocate_timer = GRINDER_RELOCATE_INTERVAL
-			place_grinder_random(previous_origin)
+		# Mid-wave blade relocation (wave-config-driven; 0 = disabled).
+		if mid_wave_relocations_remaining != 0:
+			grinder_relocate_timer -= delta
+			if grinder_relocate_timer <= 0.0:
+				var previous_origin := grinder_origin
+				grinder_active          = false
+				grinder_telegraph_timer = GRINDER_TELEGRAPH_TIME
+				if mid_wave_relocations_remaining == -1:
+					grinder_relocate_timer = 15.0     ## continuous every 15 s (L3 W3)
+				else:
+					mid_wave_relocations_remaining -= 1
+					grinder_relocate_timer = 30.0 if mid_wave_relocations_remaining > 0 else 999999.0
+				place_grinder_random(previous_origin)
+
 	bean_spawn_timer += delta
 	while bean_spawn_timer >= bean_trickle_interval:
 		bean_spawn_timer -= bean_trickle_interval
-		spawn_idle_beans(rng.randi_range(2, 3))
+		spawn_idle_beans(current_trickle_per_rotation)
+
+	# Check whether the current wave's cumulative score target has been reached.
+	check_wave_completion()
 
 	if is_grinding:
 		process_grind(delta)
@@ -1407,6 +1543,12 @@ func step_game() -> void:
 		infect_nearest_chain_beans(2)
 		spawn_wake_pulse(new_head)
 
+	# Water puddle: grant Washed buff on each step through a puddle cell.
+	if water_puddles_enabled and is_water_puddle_at(new_head):
+		washed_buff_timer = minf(WASHED_BUFF_DURATION, washed_buff_timer + 5.0)
+		extraction_feedback     = "Washed! ×1.5"
+		extraction_feedback_ttl = 1.2
+
 	if is_cell_in_list(new_head, grinding_teeth_cells):
 		scatter_on_hazard_contact()
 
@@ -1430,8 +1572,231 @@ func trigger_game_over() -> void:
 	save_high_score_if_needed()
 	queue_redraw()
 
+# ---------------------------------------------------------------------------
+# Water puddles
+# ---------------------------------------------------------------------------
+
+func _setup_water_puddles() -> void:
+	var wave_cfg: Dictionary = wave_mgr.get_current_wave_config()
+	var puddle_count: int    = int(wave_cfg.get("water_puddle_count", 0))
+	water_puddle_cells.clear()
+	if puddle_count <= 0:
+		return
+	var occupied := {}
+	for cell in snake:
+		occupied[cell] = true
+	for cell in get_grinder_cells():
+		occupied[cell] = true
+	for cell in idle_beans:
+		occupied[cell] = true
+	for cell in grinding_teeth_cells:
+		occupied[cell] = true
+	for cell in gear_gap_cells:
+		occupied[cell] = true
+	for cell in pebble_cells:
+		occupied[cell] = true
+	for _i: int in range(puddle_count):
+		water_puddle_cells.append(random_inner_cell(occupied))
+
+
+func is_water_puddle_at(cell: Vector2i) -> bool:
+	return is_cell_in_list(cell, water_puddle_cells)
+
+
+# ---------------------------------------------------------------------------
+# Pressure Release
+# ---------------------------------------------------------------------------
+
+func trigger_pressure_release_telegraph() -> void:
+	pressure_vent_side               = rng.randi_range(0, 3)
+	pressure_release_telegraph_timer = PRESSURE_RELEASE_TELEGRAPH_SEC
+
+
+func apply_pressure_release() -> void:
+	var push_dir := Vector2i.RIGHT
+	match pressure_vent_side:
+		0: push_dir = Vector2i.RIGHT
+		1: push_dir = Vector2i.LEFT
+		2: push_dir = Vector2i.DOWN
+		_: push_dir = Vector2i.UP
+
+	for i: int in range(snake.size()):
+		var seg := snake[i]
+		for _j: int in range(PRESSURE_RELEASE_PUSH_CELLS):
+			var candidate := seg + push_dir
+			if in_bounds(candidate):
+				seg = candidate
+			else:
+				break
+		snake[i] = seg
+
+	for i: int in range(idle_beans.size()):
+		var bean := idle_beans[i]
+		for _j: int in range(PRESSURE_RELEASE_PUSH_CELLS):
+			var candidate := bean + push_dir
+			if in_bounds(candidate):
+				bean = candidate
+			else:
+				break
+		idle_beans[i] = bean
+
+	# If the push landed the head on an active grinder, start grinding immediately.
+	if not snake.is_empty() and grinder_active and is_grinder_cell(snake[0]):
+		begin_grind_sequence()
+	queue_redraw()
+
+
+# ---------------------------------------------------------------------------
+# Level / wave integration
+# ---------------------------------------------------------------------------
+
+## Reads the active level's config from WaveManager and applies all runtime flags.
+func _apply_level_config() -> void:
+	var data: Dictionary = wave_mgr.get_level_data()
+	move_interval                = float(data.get("base_move_interval", 0.13))
+	grinder_size                 = int(data.get("grinder_size", 2))
+	extraction_timer_enabled     = bool(data.get("extraction_timer_enabled", true))
+	piston_enabled               = bool(data.get("piston_enabled", true))
+	machine_hazards_enabled      = bool(data.get("machine_hazards_enabled", true))
+	ingredient_hazards_enabled   = bool(data.get("ingredient_hazards_enabled", true))
+	enemies_enabled              = bool(data.get("enemies_enabled", true))
+	water_puddles_enabled        = bool(data.get("water_puddles_enabled", false))
+	pressure_release_enabled     = bool(data.get("pressure_release_enabled", false))
+	active_burr_interval         = float(data.get("burr_interval", BURR_ROTATION_INTERVAL))
+	active_piston_interval       = float(data.get("piston_interval", PISTON_INTERVAL))
+	active_pressure_interval     = float(data.get("pressure_interval", 15.0))
+
+
+## Called when wave_mgr emits wave_started.
+## Spawns the initial bean batch for this wave and updates the trickle rate.
+func _on_wave_started(wave_idx: int, _wave_name: String, initial_batch: int, trickle: int) -> void:
+	current_trickle_per_rotation = trickle
+	bean_spawn_timer             = 0.0
+
+	# Configure mid-wave blade relocation from the wave config.
+	var wave_cfg: Dictionary    = wave_mgr.get_current_wave_config()
+	var blade_relocates: int    = int(wave_cfg.get("blade_relocates", 0))
+	mid_wave_relocations_remaining = blade_relocates
+	if blade_relocates == -1:
+		grinder_relocate_timer = 15.0          ## continuous every 15 s
+	elif blade_relocates > 0:
+		grinder_relocate_timer = 30.0          ## first mid-wave relocation in 30 s
+	else:
+		grinder_relocate_timer = 999999.0      ## blade stays fixed this wave
+
+	# For waves after the first, telegraph a fresh blade position.
+	if wave_idx > 0:
+		var prev := grinder_origin
+		grinder_active          = false
+		grinder_telegraph_timer = GRINDER_TELEGRAPH_TIME
+		place_grinder_random(prev)
+
+	# Setup water puddles for this wave (count read from wave config).
+	water_puddle_cells.clear()
+	if water_puddles_enabled:
+		_setup_water_puddles()
+
+	# Reset pressure-release timer for the new wave.
+	if pressure_release_enabled:
+		pressure_release_timer           = active_pressure_interval
+		pressure_release_telegraph_timer = 0.0
+
+	spawn_idle_beans(initial_batch)
+
+
+## Called when wave_mgr emits wave_completed.
+func _on_wave_completed(_wave_idx: int) -> void:
+	# Placeholder for future per-wave-end effects (SFX, score tally flash, etc.).
+	pass
+
+
+## Called when wave_mgr emits level_cleared.
+## The banner is still showing at this point; the LEVEL_COMPLETE transition
+## happens in _physics_process once wave_mgr.is_done() returns true.
+func _on_level_cleared(_lid: String) -> void:
+	pass
+
+
+## Check whether the running score has crossed the current wave's cumulative
+## target.  Call once per physics frame after any score update.
+func check_wave_completion() -> void:
+	if not wave_mgr.is_playing():
+		return
+	if score >= wave_mgr.get_wave_score_target():
+		wave_mgr.complete_wave()
+
+
+# ---------------------------------------------------------------------------
+# Wave banner drawing
+# ---------------------------------------------------------------------------
+
+## Draws the full-screen wave-transition banner overlay.
+## Uses a sine-envelope so the panel fades in and out over the banner duration.
+func draw_wave_banner() -> void:
+	if not wave_mgr.is_in_banner():
+		return
+
+	var viewport_size := get_viewport_rect().size
+	var progress: float = float(wave_mgr.get_banner_progress())   # 0 → 1
+	var alpha: float    = sin(progress * PI)                      # 0 → 1 → 0
+
+	# Semi-opaque darkened bar across the middle third of the screen.
+	var panel_h   := viewport_size.y * 0.30
+	var panel_y   := (viewport_size.y - panel_h) * 0.5
+	var panel_rect := Rect2(0.0, panel_y, viewport_size.x, panel_h)
+	draw_rect(panel_rect, Color(0.07, 0.05, 0.03, 0.90 * alpha), true)
+	draw_rect(panel_rect, Color(COLOR_PANEL_EDGE.r, COLOR_PANEL_EDGE.g,
+			COLOR_PANEL_EDGE.b, alpha), false, 2.0)
+	# Horizontal accent lines.
+	draw_line(
+		Vector2(0.0, panel_y),
+		Vector2(viewport_size.x, panel_y),
+		Color(COLOR_BRASS.r, COLOR_BRASS.g, COLOR_BRASS.b, alpha * 0.8), 2.0)
+	draw_line(
+		Vector2(0.0, panel_y + panel_h),
+		Vector2(viewport_size.x, panel_y + panel_h),
+		Color(COLOR_BRASS.r, COLOR_BRASS.g, COLOR_BRASS.b, alpha * 0.8), 2.0)
+
+	var title: String = str(wave_mgr.get_banner_title())
+	var sub: String   = str(wave_mgr.get_banner_sub_text())
+	var title_y := panel_y + panel_h * 0.42
+	var sub_y   := panel_y + panel_h * 0.72
+
+	draw_string(hud_font, Vector2(panel_rect.position.x, title_y), title,
+			HORIZONTAL_ALIGNMENT_CENTER, viewport_size.x, 34,
+			Color(COLOR_BRASS.r, COLOR_BRASS.g, COLOR_BRASS.b, alpha))
+	draw_string(hud_font, Vector2(panel_rect.position.x, sub_y), sub,
+			HORIZONTAL_ALIGNMENT_CENTER, viewport_size.x, 18,
+			Color(COLOR_TEXT.r, COLOR_TEXT.g, COLOR_TEXT.b, alpha * 0.9))
+
+
+## Draws the level-complete overlay (shown after the wave banner resolves to DONE).
+func draw_level_complete_panel() -> void:
+	var viewport_size := get_viewport_rect().size
+	var panel_size    := Vector2(480.0, 240.0)
+	var panel_pos     := (viewport_size - panel_size) * 0.5
+
+	draw_rect(Rect2(panel_pos, panel_size), Color(0.08, 0.06, 0.04, 0.96), true)
+	draw_rect(Rect2(panel_pos, panel_size), COLOR_PANEL_EDGE, false, 3.0)
+
+	draw_string(hud_font, panel_pos + Vector2(34.0, 56.0),
+			wave_mgr.get_level_display_name().to_upper() + " — COMPLETE!",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 28, COLOR_BRASS)
+	draw_string(hud_font, panel_pos + Vector2(34.0, 96.0),
+			"Final Score: %d" % score,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 22, COLOR_TEXT)
+	draw_string(hud_font, panel_pos + Vector2(34.0, 126.0),
+			"Best Score:  %d" % saved_high_score,
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 22, COLOR_TEXT)
+	draw_string(hud_font, panel_pos + Vector2(34.0, 168.0),
+			"Enter: Play Again",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_BRASS)
+	draw_string(hud_font, panel_pos + Vector2(34.0, 196.0),
+			"Esc:   Return to Menu",
+			HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_BRASS)
+
 func _process(delta: float) -> void:
-	if game_state == GameState.PLAYING:
+	if game_state == GameState.PLAYING or game_state == GameState.LEVEL_COMPLETE or wave_mgr.is_in_banner():
 		grinder_angle += delta * 3.0
 
 	if extraction_feedback_ttl > 0.0:
@@ -1484,6 +1849,7 @@ func _draw() -> void:
 	draw_machine_frame()
 	draw_grid()
 	draw_machine_hazards()
+	draw_water_puddles()
 	draw_grinder()
 	draw_ingredient_hazards()
 	draw_enemy_hazards()
@@ -1492,7 +1858,50 @@ func _draw() -> void:
 	draw_grind_pops()
 	draw_waste_spills()
 	draw_wake_pulses()
+	draw_pressure_release_fx()
 	draw_hud()
+	draw_wave_banner()
+
+## Draws blue water-puddle pools on the field (L2 + L3 feature).
+func draw_water_puddles() -> void:
+	if water_puddle_cells.is_empty():
+		return
+	var t := float(Time.get_ticks_msec()) * 0.001
+	for puddle in water_puddle_cells:
+		var pp     := grid_to_pixel(puddle)
+		var center := pp + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+		draw_circle(center, CELL_SIZE * 0.44, Color(0.12, 0.38, 0.68, 0.30))
+		draw_circle(center, CELL_SIZE * 0.27, Color(0.22, 0.58, 0.92, 0.20))
+		var ripple_r := CELL_SIZE * 0.17 + sin(t * 1.8 + float(puddle.x + puddle.y) * 0.7) * 2.5
+		draw_arc(center, ripple_r, 0.0, TAU, 18, Color(0.55, 0.78, 1.0, 0.28), 1.2)
+
+
+## Draws the Pressure-Release steam telegraph indicator (L3 feature).
+func draw_pressure_release_fx() -> void:
+	if not pressure_release_enabled or pressure_release_telegraph_timer <= 0.0:
+		return
+	var t     := 1.0 - clampf(pressure_release_telegraph_timer / PRESSURE_RELEASE_TELEGRAPH_SEC, 0.0, 1.0)
+	var alpha := t * 0.6
+	var bar_col  := Color(0.75, 0.90, 1.0, alpha)
+	var text_col := Color(0.85, 0.97, 1.0, minf(1.0, alpha * 2.0))
+	match pressure_vent_side:
+		0:  ## Left vent → push right
+			draw_rect(Rect2(board_origin.x, board_origin.y, 10.0, board_size.y), bar_col, true)
+			draw_string(hud_font, board_origin + Vector2(14.0, board_size.y * 0.5),
+					"STEAM →", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, text_col)
+		1:  ## Right vent → push left
+			draw_rect(Rect2(board_origin.x + board_size.x - 10.0, board_origin.y, 10.0, board_size.y), bar_col, true)
+			draw_string(hud_font, board_origin + Vector2(board_size.x - 72.0, board_size.y * 0.5),
+					"← STEAM", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, text_col)
+		2:  ## Top vent → push down
+			draw_rect(Rect2(board_origin.x, board_origin.y, board_size.x, 10.0), bar_col, true)
+			draw_string(hud_font, board_origin + Vector2(board_size.x * 0.5 - 32.0, 18.0),
+					"STEAM ↓", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, text_col)
+		_:  ## Bottom vent → push up
+			draw_rect(Rect2(board_origin.x, board_origin.y + board_size.y - 10.0, board_size.x, 10.0), bar_col, true)
+			draw_string(hud_font, board_origin + Vector2(board_size.x * 0.5 - 32.0, board_size.y - 14.0),
+					"↑ STEAM", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, text_col)
+
 
 func draw_enemy_hazards() -> void:
 	for i in range(decaf_beans.size()):
@@ -1699,7 +2108,7 @@ func draw_grinder() -> void:
 		return
 
 	var grinder_pos := grid_to_pixel(grinder_origin)
-	var grinder_size_px := Vector2(float(CELL_SIZE * GRINDER_SIZE), float(CELL_SIZE * GRINDER_SIZE))
+	var grinder_size_px := Vector2(float(CELL_SIZE * grinder_size), float(CELL_SIZE * grinder_size))
 	var grinder_rect := Rect2(grinder_pos, grinder_size_px)
 	var center := grinder_rect.position + grinder_rect.size * 0.5
 
@@ -1727,7 +2136,7 @@ func draw_grinder() -> void:
 			draw_string(hud_font, text_pos, tele_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d0a45a"))
 		return
 
-	# Housing occupying exactly 2x2 cells.
+	# Housing occupying grinder_size × grinder_size cells.
 	draw_rect(grinder_rect, Color("2f302f"), true)
 	draw_rect(grinder_rect, Color("6f6a61"), false, 2.0)
 	draw_rect(Rect2(grinder_rect.position + Vector2(2, 2), grinder_rect.size - Vector2(4, 4)), Color("3d3e3d"), false, 1.0)
@@ -1933,11 +2342,27 @@ func draw_hud() -> void:
 	draw_line(Vector2(0, HUD_PRIMARY_HEIGHT), Vector2(viewport_size.x, HUD_PRIMARY_HEIGHT), COLOR_PANEL_EDGE, 1.0)
 	draw_line(Vector2(0, HUD_HEIGHT), Vector2(viewport_size.x, HUD_HEIGHT), COLOR_PANEL_EDGE, 2.0)
 
-	var title := "STEAMPUNK SNAKE"
-	draw_string(hud_font, Vector2(28, 34), title, HORIZONTAL_ALIGNMENT_LEFT, -1, 30, COLOR_BRASS)
+	# Level name replaces the old placeholder title.
+	var level_title: String = str(wave_mgr.get_level_display_name()).to_upper()
+	draw_string(hud_font, Vector2(28, 30), level_title, HORIZONTAL_ALIGNMENT_LEFT, -1, 22, COLOR_BRASS)
+
+	# Wave progress: "Wave X / 3" + compact score-vs-target bar.
+	var wave_num: int    = int(wave_mgr.get_display_wave_number())
+	var wave_total: int  = int(wave_mgr.get_wave_count())
+	var wave_target: int = int(wave_mgr.get_wave_score_target())
+	var wave_label  := "Wave %d/%d  Target: %d" % [wave_num, wave_total, wave_target]
+	draw_string(hud_font, Vector2(28, 50), wave_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
+
+	# Thin progress bar showing score vs. wave target.
+	var bar_rect  := Rect2(28.0, 56.0, 220.0, 6.0)
+	var bar_ratio := clampf(float(score) / float(maxi(wave_target, 1)), 0.0, 1.0)
+	draw_rect(bar_rect, Color("1a140f"), true)
+	draw_rect(bar_rect, COLOR_PANEL_EDGE, false, 1.0)
+	var bar_fill_col := COLOR_BRASS if bar_ratio >= 0.9 else Color("6f9f52")
+	draw_rect(Rect2(bar_rect.position + Vector2(1, 1), Vector2((bar_rect.size.x - 2.0) * bar_ratio, bar_rect.size.y - 2.0)), bar_fill_col, true)
 
 	var score_text := "Score: %d   Best: %d" % [score, best_score]
-	draw_string(hud_font, Vector2(28, 64), score_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
+	draw_string(hud_font, Vector2(28, 76), score_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_TEXT)
 
 	var chain_count := snake.size()
 	var chain_col := Color("6aa75a") if chain_count <= 14 else (COLOR_BRASS if chain_count <= GRINDER_DOSE_CAP else COLOR_DANGER)
@@ -1979,6 +2404,10 @@ func draw_hud() -> void:
 	draw_string(hud_font, Vector2(510.0, rally_row_y), "%.1fs" % burr_left, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_BRASS)
 	draw_string(hud_font, Vector2(610.0, rally_row_y), "Piston %s %.1fs" % [piston_state, piston_left], HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
 	draw_string(hud_font, Vector2(790.0, rally_row_y), "Oil %s" % slip_state, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
+	if pressure_release_enabled:
+		var steam_left := pressure_release_timer if pressure_release_telegraph_timer <= 0.0 else pressure_release_telegraph_timer
+		var steam_label := "Steam %.1fs" % steam_left
+		draw_string(hud_font, Vector2(858.0, rally_row_y), steam_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color("a8d4e8"))
 
 	if extraction_active:
 		var cup_rect := Rect2(860.0, 12.0, 78.0, 58.0)
@@ -2003,7 +2432,10 @@ func draw_hud() -> void:
 		draw_string(hud_font, cup_rect.position + Vector2(8.0, 40.0), "%.1fs" % extraction_timer, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, COLOR_TEXT)
 
 	if extraction_feedback_ttl > 0.0:
-		draw_string(hud_font, Vector2(860.0, 78.0), extraction_feedback, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, COLOR_BRASS)
+		draw_string(hud_font, Vector2(860.0, 70.0), extraction_feedback, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, COLOR_BRASS)
+	if washed_buff_timer > 0.0:
+		draw_string(hud_font, Vector2(860.0, 80.0), "Washed ×1.5  %.0fs" % washed_buff_timer,
+				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("6fa8dc"))
 
 	var controls := "Arrows / WASD Move   Space Rally   E/Enter Pull Shot   Esc Pause"
 	var frame_bottom := board_origin.y + board_size.y + 22.0
@@ -2021,6 +2453,9 @@ func draw_hud() -> void:
 
 	if game_state == GameState.GAME_OVER:
 		draw_game_over_panel()
+
+	if game_state == GameState.LEVEL_COMPLETE:
+		draw_level_complete_panel()
 
 	if game_state == GameState.PLAYING and resume_countdown_left > 0.0:
 		var countdown := int(ceil(resume_countdown_left))
