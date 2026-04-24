@@ -30,6 +30,11 @@ const BEAN_SPAWN_APPEAR := 0.10
 const BEAN_SPAWN_BOUNCE := 0.14
 const BEAN_SPAWN_SETTLE := 0.08
 const BEAN_SPAWN_TOTAL := BEAN_SPAWN_SHADOW + BEAN_SPAWN_APPEAR + BEAN_SPAWN_BOUNCE + BEAN_SPAWN_SETTLE
+const GRINDER_SIZE := 2
+const GRINDER_TELEGRAPH_TIME := 2.0
+const GRINDER_RELOCATE_INTERVAL := 5.0
+const GRIND_POP_LIFE := 0.20
+const GRIND_STEP_INTERVAL := 0.035
 
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
@@ -65,6 +70,14 @@ var wake_pulses: Array[Dictionary] = []
 var bean_spawn_timer := 0.0
 var bean_trickle_interval := 8.0
 var bean_spawn_age: Dictionary = {}
+var grinder_origin: Vector2i = Vector2i(-1, -1)
+var grinder_angle := 0.0
+var grinder_active := false
+var grinder_telegraph_timer := 0.0
+var grinder_relocate_timer := 0.0
+var is_grinding := false
+var grind_step_timer := 0.0
+var grind_pops: Array[Dictionary] = []
 
 func _ready() -> void:
 	rng.randomize()
@@ -83,6 +96,14 @@ func _ready() -> void:
 	wake_pulses.clear()
 	bean_spawn_age.clear()
 	bean_spawn_timer = 0.0
+	grinder_origin = Vector2i(-1, -1)
+	grinder_angle = 0.0
+	grinder_active = false
+	grinder_telegraph_timer = 0.0
+	grinder_relocate_timer = GRINDER_RELOCATE_INTERVAL
+	is_grinding = false
+	grind_step_timer = 0.0
+	grind_pops.clear()
 	game_state = GameState.START_MENU
 
 func start_new_run() -> void:
@@ -101,10 +122,76 @@ func start_new_run() -> void:
 	next_direction = Vector2i.RIGHT
 	idle_beans.clear()
 	bean_spawn_age.clear()
+	place_grinder_random()
 	spawn_idle_beans(rng.randi_range(8, 15))
 	bean_spawn_timer = 0.0
+	grinder_angle = 0.0
+	grinder_active = false
+	grinder_telegraph_timer = GRINDER_TELEGRAPH_TIME
+	grinder_relocate_timer = GRINDER_RELOCATE_INTERVAL
+	is_grinding = false
+	grind_step_timer = 0.0
+	grind_pops.clear()
 	wake_pulses.clear()
 	queue_redraw()
+
+func can_spawn_leader(cell: Vector2i) -> bool:
+	return in_bounds(cell) and not is_grinder_cell(cell) and not is_idle_bean_at(cell)
+
+func find_leader_spawn_cell() -> Vector2i:
+	var preferred := Vector2i(int(GRID_SIZE.x / 2), int(GRID_SIZE.y / 2))
+	if can_spawn_leader(preferred):
+		return preferred
+
+	for _i: int in range(240):
+		var candidate := Vector2i(rng.randi_range(0, GRID_SIZE.x - 1), rng.randi_range(0, GRID_SIZE.y - 1))
+		if can_spawn_leader(candidate):
+			return candidate
+
+	for y: int in range(GRID_SIZE.y):
+		for x: int in range(GRID_SIZE.x):
+			var cell := Vector2i(x, y)
+			if can_spawn_leader(cell):
+				return cell
+
+	return Vector2i(0, 0)
+
+func spawn_new_leader_bean() -> void:
+	var spawn_cell := find_leader_spawn_cell()
+	snake.clear()
+	snake.append(spawn_cell)
+	direction = Vector2i.RIGHT
+	next_direction = Vector2i.RIGHT
+
+func spawn_grind_pop(cell: Vector2i) -> void:
+	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+	grind_pops.append({"position": center, "ttl": GRIND_POP_LIFE, "life": GRIND_POP_LIFE})
+
+func begin_grind_sequence() -> void:
+	if is_grinding or snake.is_empty():
+		return
+	is_grinding = true
+	grind_step_timer = 0.0
+
+func process_grind(delta: float) -> void:
+	if not is_grinding:
+		return
+
+	grind_step_timer += delta
+	while grind_step_timer >= GRIND_STEP_INTERVAL and is_grinding:
+		grind_step_timer -= GRIND_STEP_INTERVAL
+		if snake.is_empty():
+			is_grinding = false
+			spawn_new_leader_bean()
+			return
+
+		var consumed: Vector2i = snake.pop_front()
+		spawn_grind_pop(consumed)
+
+		if snake.is_empty():
+			is_grinding = false
+			spawn_new_leader_bean()
+			return
 
 func bean_key(cell: Vector2i) -> String:
 	return "%d:%d" % [cell.x, cell.y]
@@ -158,6 +245,8 @@ func spawn_idle_beans(count: int) -> void:
 		occupied[segment] = true
 	for bean in idle_beans:
 		occupied[bean] = true
+	for grinder_cell in get_grinder_cells():
+		occupied[grinder_cell] = true
 
 	var spawned := 0
 	var attempts := 0
@@ -172,6 +261,58 @@ func spawn_idle_beans(count: int) -> void:
 		idle_beans.append(candidate)
 		bean_spawn_age[bean_key(candidate)] = 0.0
 		spawned += 1
+
+func get_grinder_cells() -> Array[Vector2i]:
+	var cells: Array[Vector2i] = []
+	if grinder_origin.x < 0 or grinder_origin.y < 0:
+		return cells
+	for y: int in range(GRINDER_SIZE):
+		for x: int in range(GRINDER_SIZE):
+			cells.append(grinder_origin + Vector2i(x, y))
+	return cells
+
+func is_grinder_cell(cell: Vector2i) -> bool:
+	if grinder_origin.x < 0 or grinder_origin.y < 0:
+		return false
+	return (
+		cell.x >= grinder_origin.x
+		and cell.y >= grinder_origin.y
+		and cell.x < grinder_origin.x + GRINDER_SIZE
+		and cell.y < grinder_origin.y + GRINDER_SIZE
+	)
+
+func place_grinder_random(previous_origin: Vector2i = Vector2i(-1, -1)) -> void:
+	var tries := 0
+	var max_tries := 200
+	while tries < max_tries:
+		tries += 1
+		var candidate := Vector2i(
+			rng.randi_range(0, GRID_SIZE.x - GRINDER_SIZE),
+			rng.randi_range(0, GRID_SIZE.y - GRINDER_SIZE)
+		)
+		var overlaps := false
+		for y: int in range(GRINDER_SIZE):
+			for x: int in range(GRINDER_SIZE):
+				var cell := candidate + Vector2i(x, y)
+				if snake.has(cell) or is_idle_bean_at(cell):
+					overlaps = true
+					break
+				if previous_origin.x >= 0 and previous_origin.y >= 0 and (
+					cell.x >= previous_origin.x
+					and cell.y >= previous_origin.y
+					and cell.x < previous_origin.x + GRINDER_SIZE
+					and cell.y < previous_origin.y + GRINDER_SIZE
+				):
+					overlaps = true
+					break
+			if overlaps:
+				break
+		if not overlaps:
+			grinder_origin = candidate
+			return
+
+	# Fallback should be rare; still keep grinder in a valid in-bounds area.
+	grinder_origin = Vector2i(1, 1)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -264,10 +405,27 @@ func _physics_process(delta: float) -> void:
 		return
 
 	time_alive += delta
+	if not grinder_active:
+		grinder_telegraph_timer = maxf(0.0, grinder_telegraph_timer - delta)
+		if grinder_telegraph_timer <= 0.0:
+			grinder_active = true
+	else:
+		grinder_relocate_timer = maxf(0.0, grinder_relocate_timer - delta)
+		if grinder_relocate_timer <= 0.0:
+			var previous_origin := grinder_origin
+			grinder_active = false
+			grinder_telegraph_timer = GRINDER_TELEGRAPH_TIME
+			grinder_relocate_timer = GRINDER_RELOCATE_INTERVAL
+			place_grinder_random(previous_origin)
 	bean_spawn_timer += delta
 	while bean_spawn_timer >= bean_trickle_interval:
 		bean_spawn_timer -= bean_trickle_interval
 		spawn_idle_beans(rng.randi_range(2, 3))
+
+	if is_grinding:
+		process_grind(delta)
+		queue_redraw()
+		return
 
 	move_accumulator += delta
 
@@ -324,6 +482,9 @@ func reflected_direction(current_dir: Vector2i, grows: bool) -> Vector2i:
 	return Vector2i.ZERO
 
 func step_game() -> void:
+	if snake.is_empty():
+		return
+
 	direction = next_direction
 	var grows := is_idle_bean_at(snake[0] + direction)
 	var new_head := snake[0] + direction
@@ -344,6 +505,11 @@ func step_game() -> void:
 
 	snake.push_front(new_head)
 
+	if grinder_active and is_grinder_cell(new_head):
+		begin_grind_sequence()
+		queue_redraw()
+		return
+
 	if grows:
 		score += 10
 		best_score = max(best_score, score)
@@ -362,6 +528,9 @@ func trigger_game_over() -> void:
 	queue_redraw()
 
 func _process(delta: float) -> void:
+	if game_state == GameState.PLAYING:
+		grinder_angle += delta * 3.0
+
 	for key: String in bean_spawn_age.keys():
 		var age: float = float(bean_spawn_age[key]) + delta
 		bean_spawn_age[key] = minf(age, BEAN_SPAWN_TOTAL)
@@ -371,14 +540,21 @@ func _process(delta: float) -> void:
 		if float(wake_pulses[i]["ttl"]) <= 0.0:
 			wake_pulses.remove_at(i)
 
+	for i: int in range(grind_pops.size() - 1, -1, -1):
+		grind_pops[i]["ttl"] = float(grind_pops[i]["ttl"]) - delta
+		if float(grind_pops[i]["ttl"]) <= 0.0:
+			grind_pops.remove_at(i)
+
 	queue_redraw()
 
 func _draw() -> void:
 	draw_background()
 	draw_machine_frame()
 	draw_grid()
+	draw_grinder()
 	draw_idle_beans()
 	draw_snake()
+	draw_grind_pops()
 	draw_wake_pulses()
 	draw_hud()
 
@@ -476,6 +652,58 @@ func draw_grid() -> void:
 
 			draw_rect(Rect2(cell_pos, Vector2(CELL_SIZE, CELL_SIZE)), COLOR_GRID_LINE, false, 1.0)
 
+func draw_grinder() -> void:
+	if grinder_origin.x < 0 or grinder_origin.y < 0:
+		return
+
+	var grinder_pos := grid_to_pixel(grinder_origin)
+	var grinder_size_px := Vector2(float(CELL_SIZE * GRINDER_SIZE), float(CELL_SIZE * GRINDER_SIZE))
+	var grinder_rect := Rect2(grinder_pos, grinder_size_px)
+	var center := grinder_rect.position + grinder_rect.size * 0.5
+
+	if not grinder_active:
+		var pulse := 0.65 + 0.35 * sin(grinder_angle * 2.0)
+		var spin_offset := Vector2(cos(grinder_angle), sin(grinder_angle)) * 2.0
+		var shadow_col := Color(0.05, 0.04, 0.03, 0.24 + 0.12 * pulse)
+		var halo_col := Color(0.20, 0.16, 0.12, 0.20 + 0.10 * pulse)
+		draw_rect(grinder_rect, Color(0.0, 0.0, 0.0, 0.10), true)
+		draw_arc(center + spin_offset, CELL_SIZE * 0.86, 0.0, TAU, 32, shadow_col, 3.0)
+		draw_arc(center - spin_offset, CELL_SIZE * 0.62, 0.0, TAU, 28, halo_col, 2.0)
+
+		for i: int in range(4):
+			var ang := grinder_angle + float(i) * PI * 0.5
+			var dir := Vector2(cos(ang), sin(ang))
+			var p0 := center + dir * 6.0
+			var p1 := center + dir * (CELL_SIZE * 0.86)
+			draw_line(p0, p1, Color(0.08, 0.07, 0.06, 0.38), 2.0)
+
+		if game_state == GameState.PLAYING:
+			var tele_text := "GRINDER INCOMING"
+			draw_string(hud_font, grinder_rect.position + Vector2(-8, -8), tele_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d0a45a"))
+		return
+
+	# Housing occupying exactly 2x2 cells.
+	draw_rect(grinder_rect, Color("2f302f"), true)
+	draw_rect(grinder_rect, Color("6f6a61"), false, 2.0)
+	draw_rect(Rect2(grinder_rect.position + Vector2(2, 2), grinder_rect.size - Vector2(4, 4)), Color("3d3e3d"), false, 1.0)
+
+	# Rotating inner ring and blades.
+	draw_arc(center, CELL_SIZE * 0.82, 0.0, TAU, 36, Color("938d82"), 2.0)
+	draw_arc(center, CELL_SIZE * 0.42, 0.0, TAU, 24, Color("1e1f1f"), 2.0)
+
+	for i: int in range(4):
+		var ang := grinder_angle + float(i) * PI * 0.5
+		var dir := Vector2(cos(ang), sin(ang))
+		var side := Vector2(-dir.y, dir.x)
+		var tip := center + dir * (CELL_SIZE * 0.76)
+		var inner_l := center + side * 2.5
+		var inner_r := center - side * 2.5
+		draw_colored_polygon([inner_l, tip, inner_r], Color("b9b1a4"))
+
+	# Bolt in the middle.
+	draw_circle(center, 4.0, Color("c7b59b"))
+	draw_circle(center, 1.5, Color("4d3a28"))
+
 func draw_idle_beans() -> void:
 	var ticks := float(Time.get_ticks_msec()) * 0.001
 	for bean in idle_beans:
@@ -539,6 +767,25 @@ func draw_wake_pulses() -> void:
 			var p0 := center + Vector2(cos(ang), sin(ang)) * (radius - 2.0)
 			var p1 := center + Vector2(cos(ang), sin(ang)) * (radius + 5.0)
 			draw_line(p0, p1, Color(COLOR_COPPER.r, COLOR_COPPER.g, COLOR_COPPER.b, 0.6 * (1.0 - t)), 1.0)
+
+func draw_grind_pops() -> void:
+	for pop in grind_pops:
+		var ttl := float(pop["ttl"])
+		var life := float(pop["life"])
+		var t := 1.0 - clampf(ttl / life, 0.0, 1.0)
+		var center: Vector2 = pop["position"]
+		var ring_r := lerpf(3.0, 12.0, t)
+		var core_r := lerpf(4.0, 1.0, t)
+		var alpha := 0.9 * (1.0 - t)
+
+		draw_circle(center, core_r, Color(0.68, 0.52, 0.34, alpha))
+		draw_arc(center, ring_r, 0.0, TAU, 18, Color(0.88, 0.72, 0.46, alpha), 1.8)
+
+		for i: int in range(5):
+			var ang := float(i) * TAU / 5.0 + t * 0.9
+			var p0 := center + Vector2(cos(ang), sin(ang)) * (ring_r - 1.0)
+			var p1 := center + Vector2(cos(ang), sin(ang)) * (ring_r + 3.0)
+			draw_line(p0, p1, Color(0.95, 0.80, 0.55, alpha), 1.0)
 
 func draw_snake() -> void:
 	for i in snake.size():
