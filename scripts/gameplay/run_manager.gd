@@ -2,7 +2,9 @@ extends Node2D
 
 const GRID_SIZE := Vector2i(28, 18)
 const CELL_SIZE := 24
-const HUD_HEIGHT := 84
+const HUD_PRIMARY_HEIGHT := 84
+const HUD_SECONDARY_HEIGHT := 30
+const HUD_HEIGHT := HUD_PRIMARY_HEIGHT + HUD_SECONDARY_HEIGHT
 const BOARD_PADDING := 24
 
 const COLOR_BG_TOP := Color("1d1712")
@@ -47,6 +49,13 @@ const RESUME_COUNTDOWN_SEC := 3.0
 const EXTRACTION_AUTO_PULL_SEC := 36.0
 const EXTRACTION_FRESHNESS_MISS_PENALTY := 5.0
 const BURR_ROTATION_INTERVAL := 8.0
+const PLAYFIELD_SAFE_MARGIN := 1
+const CHAIN_SCATTER_FRESHNESS_LOSS := 2.0
+const CONVEYOR_PUSH_INTERVAL := 0.8
+const OIL_SLICK_SLIDE_SEC := 1.0
+const PISTON_INTERVAL := 12.0
+const PISTON_TELEGRAPH_SEC := 2.0
+const PISTON_ACTIVE_SEC := 3.0
 
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
@@ -104,6 +113,16 @@ var extraction_feedback := ""
 var extraction_feedback_ttl := 0.0
 var burr_timer := BURR_ROTATION_INTERVAL
 var burr_phase_index := 0
+var grinding_teeth_cells: Array[Vector2i] = []
+var gear_gap_cells: Array[Vector2i] = []
+var oil_slick_cells: Array[Vector2i] = []
+var conveyor_cells: Dictionary = {}
+var conveyor_push_timer := CONVEYOR_PUSH_INTERVAL
+var oil_slick_timer := 0.0
+var piston_timer := PISTON_INTERVAL
+var piston_telegraph_left := 0.0
+var piston_active_left := 0.0
+var piston_row := -1
 
 func _ready() -> void:
 	rng.randomize()
@@ -143,6 +162,16 @@ func _ready() -> void:
 	extraction_feedback_ttl = 0.0
 	burr_timer = BURR_ROTATION_INTERVAL
 	burr_phase_index = 0
+	grinding_teeth_cells.clear()
+	gear_gap_cells.clear()
+	oil_slick_cells.clear()
+	conveyor_cells.clear()
+	conveyor_push_timer = CONVEYOR_PUSH_INTERVAL
+	oil_slick_timer = 0.0
+	piston_timer = PISTON_INTERVAL
+	piston_telegraph_left = 0.0
+	piston_active_left = 0.0
+	piston_row = -1
 	game_state = GameState.START_MENU
 	best_score = max(best_score, saved_high_score)
 
@@ -179,6 +208,7 @@ func start_new_run() -> void:
 	idle_beans.clear()
 	bean_spawn_age.clear()
 	place_grinder_random()
+	setup_machine_hazards()
 	spawn_idle_beans(rng.randi_range(8, 15))
 	bean_spawn_timer = 0.0
 	grinder_angle = 0.0
@@ -200,8 +230,122 @@ func start_new_run() -> void:
 	extraction_feedback_ttl = 0.0
 	burr_timer = BURR_ROTATION_INTERVAL
 	burr_phase_index = 0
+	conveyor_push_timer = CONVEYOR_PUSH_INTERVAL
+	oil_slick_timer = 0.0
+	piston_timer = PISTON_INTERVAL
+	piston_telegraph_left = 0.0
+	piston_active_left = 0.0
+	piston_row = -1
 	wake_pulses.clear()
 	queue_redraw()
+
+func random_inner_cell(occupied: Dictionary) -> Vector2i:
+	for _i: int in range(300):
+		var candidate := Vector2i(
+			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.x - 1 - PLAYFIELD_SAFE_MARGIN),
+			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.y - 1 - PLAYFIELD_SAFE_MARGIN)
+		)
+		if not occupied.has(candidate) and not is_grinder_cell(candidate):
+			occupied[candidate] = true
+			return candidate
+	return Vector2i(PLAYFIELD_SAFE_MARGIN + 1, PLAYFIELD_SAFE_MARGIN + 1)
+
+func setup_machine_hazards() -> void:
+	grinding_teeth_cells.clear()
+	gear_gap_cells.clear()
+	oil_slick_cells.clear()
+	conveyor_cells.clear()
+
+	var occupied := {}
+	for cell in get_grinder_cells():
+		occupied[cell] = true
+
+	for _i: int in range(4):
+		grinding_teeth_cells.append(random_inner_cell(occupied))
+	for _j: int in range(6):
+		gear_gap_cells.append(random_inner_cell(occupied))
+	for _k: int in range(4):
+		oil_slick_cells.append(random_inner_cell(occupied))
+
+	var top_row := rng.randi_range(3, GRID_SIZE.y - 4)
+	var bottom_row := rng.randi_range(3, GRID_SIZE.y - 4)
+	if abs(top_row - bottom_row) < 3:
+		bottom_row = clampi(bottom_row + 3, 3, GRID_SIZE.y - 4)
+	for x: int in range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.x - PLAYFIELD_SAFE_MARGIN):
+		conveyor_cells[Vector2i(x, top_row)] = Vector2i.RIGHT
+		conveyor_cells[Vector2i(x, bottom_row)] = Vector2i.LEFT
+
+func is_cell_in_list(cell: Vector2i, list: Array[Vector2i]) -> bool:
+	for entry in list:
+		if entry == cell:
+			return true
+	return false
+
+func is_on_conveyor(cell: Vector2i) -> bool:
+	return conveyor_cells.has(cell)
+
+func conveyor_dir_for(cell: Vector2i) -> Vector2i:
+	if conveyor_cells.has(cell):
+		return conveyor_cells[cell]
+	return Vector2i.ZERO
+
+func scatter_chain_from_index(start_index: int) -> void:
+	if snake.size() <= start_index:
+		return
+
+	var detached_count := snake.size() - start_index
+	for i: int in range(start_index, snake.size()):
+		var bean := snake[i]
+		if in_bounds(bean) and not is_idle_bean_at(bean) and not is_grinder_cell(bean):
+			idle_beans.append(bean)
+			bean_spawn_age[bean_key(bean)] = BEAN_SPAWN_TOTAL
+			spawn_wake_pulse(bean)
+
+	snake.resize(start_index)
+	freshness = maxf(0.0, freshness - float(detached_count) * CHAIN_SCATTER_FRESHNESS_LOSS)
+	if freshness <= 0.0:
+		trigger_game_over()
+
+func scatter_on_hazard_contact() -> void:
+	scatter_chain_from_index(1)
+
+func apply_gear_gap_break() -> void:
+	for i: int in range(1, snake.size()):
+		if is_cell_in_list(snake[i], gear_gap_cells):
+			scatter_chain_from_index(i)
+			return
+
+func apply_conveyor_push() -> void:
+	for i: int in range(snake.size()):
+		var seg := snake[i]
+		if not is_on_conveyor(seg):
+			continue
+		var dir := conveyor_dir_for(seg)
+		var pushed := seg + dir
+		if in_bounds(pushed) and not (piston_active_left > 0.0 and pushed.y == piston_row):
+			snake[i] = pushed
+
+	for i: int in range(idle_beans.size()):
+		var bean := idle_beans[i]
+		if not is_on_conveyor(bean):
+			continue
+		var dir := conveyor_dir_for(bean)
+		var pushed := bean + dir
+		if in_bounds(pushed) and not is_grinder_cell(pushed):
+			idle_beans[i] = pushed
+
+func trigger_piston_telegraph() -> void:
+	piston_row = rng.randi_range(2, GRID_SIZE.y - 3)
+	piston_telegraph_left = PISTON_TELEGRAPH_SEC
+
+func trigger_piston_slam() -> void:
+	piston_active_left = PISTON_ACTIVE_SEC
+	piston_telegraph_left = 0.0
+
+	for i: int in range(1, snake.size()):
+		if snake[i].y == piston_row:
+			scatter_chain_from_index(i)
+			return
 
 func extraction_multiplier(seconds: float) -> float:
 	if seconds <= 15.0:
@@ -299,7 +443,15 @@ func trigger_burr_rotation() -> void:
 			occupied[moved] = true
 
 func can_spawn_leader(cell: Vector2i) -> bool:
-	return in_bounds(cell) and not is_grinder_cell(cell) and not is_idle_bean_at(cell)
+	return in_bounds(cell) and is_inside_spawn_safe_area(cell) and not is_grinder_cell(cell) and not is_idle_bean_at(cell)
+
+func is_inside_spawn_safe_area(cell: Vector2i) -> bool:
+	return (
+		cell.x >= PLAYFIELD_SAFE_MARGIN
+		and cell.y >= PLAYFIELD_SAFE_MARGIN
+		and cell.x <= GRID_SIZE.x - 1 - PLAYFIELD_SAFE_MARGIN
+		and cell.y <= GRID_SIZE.y - 1 - PLAYFIELD_SAFE_MARGIN
+	)
 
 func find_leader_spawn_cell() -> Vector2i:
 	var preferred := Vector2i(int(GRID_SIZE.x / 2), int(GRID_SIZE.y / 2))
@@ -457,7 +609,10 @@ func spawn_idle_beans(count: int) -> void:
 
 	while spawned < count and attempts < max_attempts:
 		attempts += 1
-		var candidate := Vector2i(rng.randi_range(0, GRID_SIZE.x - 1), rng.randi_range(0, GRID_SIZE.y - 1))
+		var candidate := Vector2i(
+			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.x - 1 - PLAYFIELD_SAFE_MARGIN),
+			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.y - 1 - PLAYFIELD_SAFE_MARGIN)
+		)
 		if occupied.has(candidate):
 			continue
 		occupied[candidate] = true
@@ -490,8 +645,8 @@ func place_grinder_random(previous_origin: Vector2i = Vector2i(-1, -1)) -> void:
 	while tries < max_tries:
 		tries += 1
 		var candidate := Vector2i(
-			rng.randi_range(0, GRID_SIZE.x - GRINDER_SIZE),
-			rng.randi_range(0, GRID_SIZE.y - GRINDER_SIZE)
+			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.x - GRINDER_SIZE - PLAYFIELD_SAFE_MARGIN),
+			rng.randi_range(PLAYFIELD_SAFE_MARGIN, GRID_SIZE.y - GRINDER_SIZE - PLAYFIELD_SAFE_MARGIN)
 		)
 		var overlaps := false
 		for y: int in range(GRINDER_SIZE):
@@ -515,7 +670,7 @@ func place_grinder_random(previous_origin: Vector2i = Vector2i(-1, -1)) -> void:
 			return
 
 	# Fallback should be rare; still keep grinder in a valid in-bounds area.
-	grinder_origin = Vector2i(1, 1)
+	grinder_origin = Vector2i(PLAYFIELD_SAFE_MARGIN, PLAYFIELD_SAFE_MARGIN)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -603,6 +758,8 @@ func _unhandled_input(event: InputEvent) -> void:
 func try_set_direction(candidate: Vector2i) -> void:
 	if game_over:
 		return
+	if oil_slick_timer > 0.0:
+		return
 	if candidate == -direction:
 		return
 	next_direction = candidate
@@ -632,6 +789,25 @@ func _physics_process(delta: float) -> void:
 	if burr_timer <= 0.0:
 		burr_timer += BURR_ROTATION_INTERVAL
 		trigger_burr_rotation()
+
+	conveyor_push_timer -= delta
+	if conveyor_push_timer <= 0.0:
+		conveyor_push_timer += CONVEYOR_PUSH_INTERVAL
+		apply_conveyor_push()
+
+	oil_slick_timer = maxf(0.0, oil_slick_timer - delta)
+
+	if piston_active_left > 0.0:
+		piston_active_left = maxf(0.0, piston_active_left - delta)
+	elif piston_telegraph_left > 0.0:
+		piston_telegraph_left = maxf(0.0, piston_telegraph_left - delta)
+		if piston_telegraph_left <= 0.0:
+			trigger_piston_slam()
+	else:
+		piston_timer -= delta
+		if piston_timer <= 0.0:
+			piston_timer += PISTON_INTERVAL
+			trigger_piston_telegraph()
 
 	var steer_axis := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
 	if steer_axis.length() > 0.0:
@@ -681,6 +857,8 @@ func in_bounds(cell: Vector2i) -> bool:
 
 func is_cell_blocked(cell: Vector2i, _grows: bool) -> bool:
 	if not in_bounds(cell):
+		return true
+	if piston_active_left > 0.0 and piston_row >= 0 and cell.y == piston_row:
 		return true
 	return false
 
@@ -757,6 +935,14 @@ func step_game() -> void:
 	else:
 		snake.pop_back()
 
+	if is_cell_in_list(new_head, grinding_teeth_cells):
+		scatter_on_hazard_contact()
+
+	if is_cell_in_list(new_head, oil_slick_cells):
+		oil_slick_timer = OIL_SLICK_SLIDE_SEC
+
+	apply_gear_gap_break()
+
 	queue_redraw()
 
 func trigger_game_over() -> void:
@@ -811,6 +997,7 @@ func _draw() -> void:
 	draw_background()
 	draw_machine_frame()
 	draw_grid()
+	draw_machine_hazards()
 	draw_grinder()
 	draw_idle_beans()
 	draw_snake()
@@ -818,6 +1005,53 @@ func _draw() -> void:
 	draw_waste_spills()
 	draw_wake_pulses()
 	draw_hud()
+
+func draw_machine_hazards() -> void:
+	var time_phase := float(Time.get_ticks_msec()) * 0.001
+
+	for cell_key in conveyor_cells.keys():
+		var cell := cell_key as Vector2i
+		var dir := conveyor_dir_for(cell)
+		var pos := grid_to_pixel(cell)
+		draw_rect(Rect2(pos + Vector2(1, 1), Vector2(CELL_SIZE - 2, CELL_SIZE - 2)), Color(0.25, 0.28, 0.30, 0.75), true)
+		for s: int in range(3):
+			var phase := fmod(time_phase * 20.0 + float(s) * 6.0, float(CELL_SIZE))
+			if dir == Vector2i.RIGHT or dir == Vector2i.LEFT:
+				var x := pos.x + phase
+				draw_line(Vector2(x, pos.y + 4.0), Vector2(x - 6.0 * float(dir.x), pos.y + float(CELL_SIZE) - 4.0), Color(0.70, 0.72, 0.74, 0.35), 1.0)
+			else:
+				var y := pos.y + phase
+				draw_line(Vector2(pos.x + 4.0, y), Vector2(pos.x + float(CELL_SIZE) - 4.0, y - 6.0 * float(dir.y)), Color(0.70, 0.72, 0.74, 0.35), 1.0)
+
+	for gap_cell in gear_gap_cells:
+		var gp := grid_to_pixel(gap_cell)
+		draw_rect(Rect2(gp + Vector2(2, 2), Vector2(CELL_SIZE - 4, CELL_SIZE - 4)), Color(0.06, 0.06, 0.07, 0.90), true)
+		draw_rect(Rect2(gp + Vector2(2, 2), Vector2(CELL_SIZE - 4, CELL_SIZE - 4)), Color(0.25, 0.25, 0.27, 0.65), false, 1.0)
+
+	for oil_cell in oil_slick_cells:
+		var op := grid_to_pixel(oil_cell)
+		draw_rect(Rect2(op + Vector2(3, 4), Vector2(CELL_SIZE - 6, CELL_SIZE - 8)), Color(0.09, 0.08, 0.08, 0.85), true)
+		draw_line(op + Vector2(5, 9), op + Vector2(CELL_SIZE - 6, 7), Color(0.58, 0.58, 0.62, 0.28), 1.0)
+
+	for tooth_cell in grinding_teeth_cells:
+		var tp := grid_to_pixel(tooth_cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+		draw_circle(tp, CELL_SIZE * 0.30, Color(0.62, 0.62, 0.60, 0.95))
+		for i: int in range(8):
+			var ang := grinder_angle * 1.4 + float(i) * TAU / 8.0
+			var inner := tp + Vector2(cos(ang), sin(ang)) * (CELL_SIZE * 0.28)
+			var outer := tp + Vector2(cos(ang), sin(ang)) * (CELL_SIZE * 0.42)
+			draw_line(inner, outer, Color(0.82, 0.82, 0.78, 0.92), 2.0)
+
+	if piston_row >= 0:
+		var y := board_origin.y + float(piston_row * CELL_SIZE)
+		if piston_telegraph_left > 0.0:
+			var t := 1.0 - clampf(piston_telegraph_left / PISTON_TELEGRAPH_SEC, 0.0, 1.0)
+			var tele_col := Color(0.80, 0.20, 0.14, 0.20 + 0.45 * t)
+			draw_rect(Rect2(board_origin.x, y, board_size.x, CELL_SIZE), tele_col, true)
+			draw_string(hud_font, Vector2(board_origin.x + 10.0, y + 17.0), "PISTON WARNING", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color("f1c39d"))
+		elif piston_active_left > 0.0:
+			draw_rect(Rect2(board_origin.x, y, board_size.x, CELL_SIZE), Color(0.42, 0.42, 0.44, 0.95), true)
+			draw_rect(Rect2(board_origin.x, y, board_size.x, CELL_SIZE), Color(0.78, 0.78, 0.75, 0.7), false, 2.0)
 
 func draw_background() -> void:
 	var viewport_size := get_viewport_rect().size
@@ -940,7 +1174,10 @@ func draw_grinder() -> void:
 
 		if game_state == GameState.PLAYING:
 			var tele_text := "GRINDER INCOMING"
-			draw_string(hud_font, grinder_rect.position + Vector2(-8, -8), tele_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d0a45a"))
+			var text_pos := grinder_rect.position + Vector2(-8, -8)
+			text_pos.x = clampf(text_pos.x, board_origin.x + 4.0, board_origin.x + board_size.x - 150.0)
+			text_pos.y = clampf(text_pos.y, board_origin.y + 14.0, board_origin.y + board_size.y - 6.0)
+			draw_string(hud_font, text_pos, tele_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 12, Color("d0a45a"))
 		return
 
 	# Housing occupying exactly 2x2 cells.
@@ -1141,6 +1378,8 @@ func draw_hud() -> void:
 	var viewport_size := get_viewport_rect().size
 	var hud_rect := Rect2(0.0, 0.0, viewport_size.x, HUD_HEIGHT)
 	draw_rect(hud_rect, Color("261b14"), true)
+	draw_rect(Rect2(0.0, HUD_PRIMARY_HEIGHT, viewport_size.x, HUD_SECONDARY_HEIGHT), Color("1f1611"), true)
+	draw_line(Vector2(0, HUD_PRIMARY_HEIGHT), Vector2(viewport_size.x, HUD_PRIMARY_HEIGHT), COLOR_PANEL_EDGE, 1.0)
 	draw_line(Vector2(0, HUD_HEIGHT), Vector2(viewport_size.x, HUD_HEIGHT), COLOR_PANEL_EDGE, 2.0)
 
 	var title := "STEAMPUNK SNAKE"
@@ -1167,9 +1406,28 @@ func draw_hud() -> void:
 	var dose_count: int = grind_grounded_count if is_grinding else mini(snake.size(), GRINDER_DOSE_CAP)
 	draw_portafilter_hud(Vector2(520.0, 44.0), dose_count, GRINDER_DOSE_CAP)
 
-	var rally_ratio := clampf(rally_cooldown_left / RALLY_COOLDOWN_SEC, 0.0, 1.0)
 	var rally_state := "READY" if rally_cooldown_left <= 0.0 else "%.1fs" % rally_cooldown_left
-	draw_string(hud_font, Vector2(760, 64), "Rally: %s" % rally_state, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_TEXT)
+	var rally_ratio := 1.0 - clampf(rally_cooldown_left / RALLY_COOLDOWN_SEC, 0.0, 1.0)
+	var rally_row_y := HUD_PRIMARY_HEIGHT + 20.0
+	draw_string(hud_font, Vector2(28.0, rally_row_y), "Rally Cooldown", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_BRASS)
+	var rally_bar := Rect2(172.0, HUD_PRIMARY_HEIGHT + 7.0, 200.0, 16.0)
+	draw_rect(rally_bar, Color("1a140f"), true)
+	draw_rect(rally_bar, COLOR_PANEL_EDGE, false, 1.0)
+	draw_rect(Rect2(rally_bar.position + Vector2(2.0, 2.0), Vector2((rally_bar.size.x - 4.0) * rally_ratio, rally_bar.size.y - 4.0)), Color("8c5c36"), true)
+	draw_string(hud_font, Vector2(388.0, rally_row_y), rally_state, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_TEXT)
+
+	var burr_left := burr_timer
+	var piston_left := piston_timer if piston_telegraph_left <= 0.0 and piston_active_left <= 0.0 else (piston_telegraph_left if piston_telegraph_left > 0.0 else piston_active_left)
+	var piston_state := "Idle"
+	if piston_telegraph_left > 0.0:
+		piston_state = "Warn"
+	elif piston_active_left > 0.0:
+		piston_state = "Slam"
+	var slip_state := "SLIP" if oil_slick_timer > 0.0 else "Grip"
+	draw_string(hud_font, Vector2(470.0, rally_row_y), "Gear", HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
+	draw_string(hud_font, Vector2(510.0, rally_row_y), "%.1fs" % burr_left, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_BRASS)
+	draw_string(hud_font, Vector2(610.0, rally_row_y), "Piston %s %.1fs" % [piston_state, piston_left], HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
+	draw_string(hud_font, Vector2(790.0, rally_row_y), "Oil %s" % slip_state, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
 
 	if extraction_active:
 		var cup_rect := Rect2(860.0, 12.0, 78.0, 58.0)
@@ -1197,7 +1455,8 @@ func draw_hud() -> void:
 		draw_string(hud_font, Vector2(860.0, 78.0), extraction_feedback, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, COLOR_BRASS)
 
 	var controls := "Arrows / WASD Move   Space Rally   E/Enter Pull Shot   Esc Pause"
-	var footer_y := board_origin.y + board_size.y + 26.0
+	var frame_bottom := board_origin.y + board_size.y + 22.0
+	var footer_y := frame_bottom + 34.0
 	var footer_rect := Rect2(0.0, footer_y - 18.0, viewport_size.x, 28.0)
 	draw_rect(footer_rect, Color(0.12, 0.09, 0.07, 0.75), true)
 	draw_line(Vector2(0.0, footer_rect.position.y), Vector2(viewport_size.x, footer_rect.position.y), COLOR_PANEL_EDGE, 1.0)
@@ -1210,27 +1469,22 @@ func draw_hud() -> void:
 		draw_pause_menu()
 
 	if game_state == GameState.GAME_OVER:
-		draw_centered_panel(
-			"PRESSURE LOST",
-			"Score %d  Best %d  (Enter restart / Esc menu)" % [score, saved_high_score]
-		)
+		draw_game_over_panel()
 
 	if game_state == GameState.PLAYING and resume_countdown_left > 0.0:
 		var countdown := int(ceil(resume_countdown_left))
 		draw_centered_panel("RESUMING", "%d" % countdown)
 
 func draw_portafilter_hud(pos: Vector2, dose_count: int, dose_cap: int) -> void:
-	var body := Rect2(pos.x + 24.0, pos.y + 8.0, 124.0, 18.0)
-	var handle := Rect2(pos.x + 148.0, pos.y + 12.0, 26.0, 10.0)
+	var body := Rect2(pos.x + 62.0, pos.y + 9.0, 186.0, 16.0)
+	var count_box := Rect2(pos.x + 256.0, pos.y + 5.0, 56.0, 24.0)
 	var ratio: float = clampf(float(dose_count) / float(dose_cap), 0.0, 1.0)
 
-	# Portafilter body and handle.
+	# Label and bar are separated so they never overlap.
+	draw_string(hud_font, Vector2(pos.x, pos.y + 22.0), "Dose", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_BRASS)
 	draw_rect(body, Color("3c2f24"), true)
 	draw_rect(body, Color("8d6a48"), false, 2.0)
-	draw_rect(handle, Color("6c4f35"), true)
-	draw_rect(handle, Color("3a291a"), false, 1.0)
 
-	# Dose fill inside basket.
 	var inner := Rect2(body.position + Vector2(2.0, 2.0), body.size - Vector2(4.0, 4.0))
 	draw_rect(inner, Color("1d140f"), true)
 	draw_rect(Rect2(inner.position, Vector2(inner.size.x * ratio, inner.size.y)), Color("8c5c36"), true)
@@ -1240,8 +1494,23 @@ func draw_portafilter_hud(pos: Vector2, dose_count: int, dose_cap: int) -> void:
 		var tx := inner.position.x + inner.size.x * float(i) / 6.0
 		draw_line(Vector2(tx, inner.position.y), Vector2(tx, inner.end.y), Color(0.12, 0.09, 0.07, 0.35), 1.0)
 
-	draw_string(hud_font, Vector2(pos.x, pos.y + 22.0), "Dose", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_BRASS)
-	draw_string(hud_font, Vector2(pos.x + 184.0, pos.y + 22.0), "%d/%d" % [dose_count, dose_cap], HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_TEXT)
+	draw_rect(count_box, Color("2a1f17"), true)
+	draw_rect(count_box, COLOR_PANEL_EDGE, false, 1.0)
+	draw_string(hud_font, Vector2(count_box.position.x + 8.0, count_box.position.y + 17.0), "%d/%d" % [dose_count, dose_cap], HORIZONTAL_ALIGNMENT_LEFT, -1, 14, COLOR_TEXT)
+
+func draw_game_over_panel() -> void:
+	var viewport_size := get_viewport_rect().size
+	var panel_size := Vector2(430.0, 220.0)
+	var panel_pos := (viewport_size - panel_size) * 0.5
+
+	draw_rect(Rect2(panel_pos, panel_size), Color(0.11, 0.08, 0.06, 0.96), true)
+	draw_rect(Rect2(panel_pos, panel_size), COLOR_PANEL_EDGE, false, 3.0)
+
+	draw_string(hud_font, panel_pos + Vector2(34.0, 54.0), "PRESSURE LOST", HORIZONTAL_ALIGNMENT_LEFT, -1, 34, COLOR_DANGER)
+	draw_string(hud_font, panel_pos + Vector2(34.0, 92.0), "Final Score: %d" % score, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
+	draw_string(hud_font, panel_pos + Vector2(34.0, 122.0), "Best Score: %d" % saved_high_score, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
+	draw_string(hud_font, panel_pos + Vector2(34.0, 160.0), "Enter: Restart Run", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_BRASS)
+	draw_string(hud_font, panel_pos + Vector2(34.0, 186.0), "Esc: Return to Menu", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_BRASS)
 
 func draw_start_menu() -> void:
 	var viewport_size := get_viewport_rect().size
