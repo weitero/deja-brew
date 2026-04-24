@@ -86,6 +86,8 @@ const PRESSURE_RELEASE_PUSH_CELLS   := 2
 
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
+var ui_scale := 1.0
+var _last_viewport_size := Vector2.ZERO
 
 var snake: Array[Vector2i] = []
 var direction := Vector2i.RIGHT
@@ -217,12 +219,8 @@ func _ready() -> void:
 	rng.randomize()
 	load_high_score()
 	hud_font = ThemeDB.fallback_font
-	var viewport_size := get_viewport_rect().size
-	board_size = Vector2(GRID_SIZE.x * CELL_SIZE, GRID_SIZE.y * CELL_SIZE)
-	board_origin = Vector2(
-		floor((viewport_size.x - board_size.x) * 0.5),
-		HUD_HEIGHT + BOARD_PADDING
-	)
+	_update_ui_scale()
+	_last_viewport_size = get_viewport_rect().size
 
 	set_process(true)
 	set_physics_process(true)
@@ -322,6 +320,7 @@ func start_new_run() -> void:
 	# Apply level-specific config before placing the grinder or hazards.
 	wave_mgr.init(level_id)
 	_apply_level_config()
+	_update_ui_scale()
 
 	place_grinder_random()
 	setup_machine_hazards()
@@ -962,12 +961,12 @@ func spawn_new_leader_bean() -> void:
 	next_direction = random_dir
 
 func spawn_grind_pop(cell: Vector2i) -> void:
-	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+	var center := grid_to_pixel(cell) + Vector2(cell_px() * 0.5, cell_px() * 0.5)
 	grind_pops.append({"position": center, "ttl": GRIND_POP_LIFE, "life": GRIND_POP_LIFE})
 
 func spawn_waste_spill(cell: Vector2i) -> void:
-	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-	var grinder_center := grid_to_pixel(grinder_origin) + Vector2(CELL_SIZE, CELL_SIZE)
+	var center := grid_to_pixel(cell) + Vector2(cell_px() * 0.5, cell_px() * 0.5)
+	var grinder_center := grid_to_pixel(grinder_origin) + Vector2(cell_px(), cell_px())
 	var outward := (center - grinder_center).normalized()
 	if outward.length() < 0.01:
 		outward = Vector2(1.0 if rng.randi_range(0, 1) == 0 else -1.0, 0.0)
@@ -1043,7 +1042,7 @@ func bean_key(cell: Vector2i) -> String:
 	return "%d:%d" % [cell.x, cell.y]
 
 func spawn_wake_pulse(cell: Vector2i) -> void:
-	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+	var center := grid_to_pixel(cell) + Vector2(cell_px() * 0.5, cell_px() * 0.5)
 	wake_pulses.append({"position": center, "ttl": 0.42, "life": 0.42})
 
 func set_pause_state(paused: bool) -> void:
@@ -1318,6 +1317,10 @@ func try_set_direction(candidate: Vector2i) -> void:
 func _physics_process(delta: float) -> void:
 	if game_state != GameState.PLAYING:
 		return
+
+	if get_viewport_rect().size != _last_viewport_size:
+		_update_ui_scale()
+		_last_viewport_size = get_viewport_rect().size
 
 	# Always advance the wave manager timer so banners expire on schedule.
 	wave_mgr.update(delta)
@@ -1901,10 +1904,10 @@ func draw_water_puddles() -> void:
 	var t := float(Time.get_ticks_msec()) * 0.001
 	for puddle in water_puddle_cells:
 		var pp     := grid_to_pixel(puddle)
-		var center := pp + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-		draw_circle(center, CELL_SIZE * 0.44, Color(0.12, 0.38, 0.68, 0.30))
-		draw_circle(center, CELL_SIZE * 0.27, Color(0.22, 0.58, 0.92, 0.20))
-		var ripple_r := CELL_SIZE * 0.17 + sin(t * 1.8 + float(puddle.x + puddle.y) * 0.7) * 2.5
+		var center := pp + Vector2(cell_px() * 0.5, cell_px() * 0.5)
+		draw_circle(center, cell_px() * 0.44, Color(0.12, 0.38, 0.68, 0.30))
+		draw_circle(center, cell_px() * 0.27, Color(0.22, 0.58, 0.92, 0.20))
+		var ripple_r := cell_px() * 0.17 + sin(t * 1.8 + float(puddle.x + puddle.y) * 0.7) * 2.5
 		draw_arc(center, ripple_r, 0.0, TAU, 18, Color(0.55, 0.78, 1.0, 0.28), 1.2)
 
 
@@ -1944,53 +1947,53 @@ func draw_enemy_hazards() -> void:
 	for drop in water_drops:
 		var cell: Vector2i = drop["cell"]
 		var px := grid_to_pixel(cell)
-		var center := px + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-		draw_circle(center, CELL_SIZE * 0.35, Color(0.26, 0.65, 0.96, 0.7))
-		draw_circle(center + Vector2(-2, -3), CELL_SIZE * 0.1, Color(0.8, 0.95, 1.0, 0.8))
+		var center := px + Vector2(cell_px() * 0.5, cell_px() * 0.5)
+		draw_circle(center, cell_px() * 0.35, Color(0.26, 0.65, 0.96, 0.7))
+		draw_circle(center + Vector2(-2.0, -3.0) * ui_scale, cell_px() * 0.1, Color(0.8, 0.95, 1.0, 0.8))
 
 	if scoop_telegraph_left > 0.0:
 		var t := 1.0 - (scoop_telegraph_left / SCOOP_TELEGRAPH_SEC)
-		var center := grid_to_pixel(scoop_center) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-		var radius := CELL_SIZE * SCOOP_RADIUS_CELLS * t
+		var center := grid_to_pixel(scoop_center) + Vector2(cell_px() * 0.5, cell_px() * 0.5)
+		var radius := cell_px() * SCOOP_RADIUS_CELLS * t
 		draw_circle(center, radius, Color(0.0, 0.0, 0.0, 0.4))
 
 	if arm_telegraph_left > 0.0:
 		var alpha := 1.0 - (arm_telegraph_left / ARM_TELEGRAPH_SEC)
 		var px := grid_to_pixel(Vector2i(0, arm_line_index) if arm_is_row else Vector2i(arm_line_index, 0))
 		if arm_is_row:
-			draw_rect(Rect2(board_origin.x, px.y, board_size.x, CELL_SIZE), Color(1.0, 0.0, 0.0, alpha * 0.3), true)
+			draw_rect(Rect2(board_origin.x, px.y, board_size.x, cell_px()), Color(1.0, 0.0, 0.0, alpha * 0.3), true)
 		else:
-			draw_rect(Rect2(px.x, board_origin.y, CELL_SIZE, board_size.y), Color(1.0, 0.0, 0.0, alpha * 0.3), true)
+			draw_rect(Rect2(px.x, board_origin.y, cell_px(), board_size.y), Color(1.0, 0.0, 0.0, alpha * 0.3), true)
 	elif arm_active_left > 0.0:
 		var progress := 1.0 - (arm_active_left / ARM_ACTIVE_SEC)
-		var thickness := CELL_SIZE * 0.8
+		var thickness := cell_px() * 0.8
 		if arm_is_row:
 			var cx := board_origin.x + (board_size.x * progress) if arm_push_dir == Vector2i.RIGHT else board_origin.x + board_size.x * (1.0 - progress)
 			var y := grid_to_pixel(Vector2i(0, arm_line_index)).y
-			draw_rect(Rect2(cx - thickness/2, y, thickness, CELL_SIZE), Color(0.6, 0.6, 0.6, 1.0), true)
+			draw_rect(Rect2(cx - thickness/2, y, thickness, cell_px()), Color(0.6, 0.6, 0.6, 1.0), true)
 		else:
 			var cy := board_origin.y + (board_size.y * progress) if arm_push_dir == Vector2i.DOWN else board_origin.y + board_size.y * (1.0 - progress)
 			var x := grid_to_pixel(Vector2i(arm_line_index, 0)).x
-			draw_rect(Rect2(x, cy - thickness/2, CELL_SIZE, thickness), Color(0.6, 0.6, 0.6, 1.0), true)
+			draw_rect(Rect2(x, cy - thickness/2, cell_px(), thickness), Color(0.6, 0.6, 0.6, 1.0), true)
 
 func draw_ingredient_hazards() -> void:
 	for pebble in pebble_cells:
 		var pp := grid_to_pixel(pebble)
-		draw_circle(pp + Vector2(CELL_SIZE * 0.32, CELL_SIZE * 0.58), 5.2, Color("6e7377"))
-		draw_circle(pp + Vector2(CELL_SIZE * 0.56, CELL_SIZE * 0.50), 6.5, Color("85898c"))
-		draw_circle(pp + Vector2(CELL_SIZE * 0.72, CELL_SIZE * 0.62), 4.6, Color("666b70"))
+		draw_circle(pp + Vector2(cell_px() * 0.32, cell_px() * 0.58), 5.2 * ui_scale, Color("6e7377"))
+		draw_circle(pp + Vector2(cell_px() * 0.56, cell_px() * 0.50), 6.5 * ui_scale, Color("85898c"))
+		draw_circle(pp + Vector2(cell_px() * 0.72, cell_px() * 0.62), 4.6 * ui_scale, Color("666b70"))
 
 	for rotten in rotten_bean_cells:
 		var rp := grid_to_pixel(rotten)
 		draw_coffee_bean(rp, Color("3f4a2a"), Color("6e8a44"), Color("222813"))
-		var mark := rp + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.45)
+		var mark := rp + Vector2(cell_px() * 0.5, cell_px() * 0.45)
 		draw_line(mark + Vector2(-3, -3), mark + Vector2(3, 3), Color("b4d176"), 1.0)
 		draw_line(mark + Vector2(-3, 3), mark + Vector2(3, -3), Color("b4d176"), 1.0)
 
 	for broken in broken_bean_cells:
 		var bp := grid_to_pixel(broken)
 		draw_coffee_bean(bp, Color("8b5a36"), Color("c88a55"), Color("351f12"))
-		var crack := bp + Vector2(CELL_SIZE * 0.48, CELL_SIZE * 0.28)
+		var crack := bp + Vector2(cell_px() * 0.48, cell_px() * 0.28)
 		draw_line(crack + Vector2(-2, 0), crack + Vector2(2, 4), Color("f0d3ac"), 1.2)
 		draw_line(crack + Vector2(2, 4), crack + Vector2(-1, 8), Color("f0d3ac"), 1.2)
 
@@ -2001,45 +2004,45 @@ func draw_machine_hazards() -> void:
 		var cell := cell_key as Vector2i
 		var dir := conveyor_dir_for(cell)
 		var pos := grid_to_pixel(cell)
-		draw_rect(Rect2(pos + Vector2(1, 1), Vector2(CELL_SIZE - 2, CELL_SIZE - 2)), Color(0.25, 0.28, 0.30, 0.75), true)
+		draw_rect(Rect2(pos + Vector2(1.0, 1.0) * ui_scale, Vector2(cell_px() - 2.0 * ui_scale, cell_px() - 2.0 * ui_scale)), Color(0.25, 0.28, 0.30, 0.75), true)
 		for s: int in range(3):
-			var phase := fmod(time_phase * 20.0 + float(s) * 6.0, float(CELL_SIZE))
+			var phase := fmod(time_phase * 20.0 + float(s) * 6.0, cell_px())
 			if dir == Vector2i.RIGHT or dir == Vector2i.LEFT:
 				var x := pos.x + phase
-				draw_line(Vector2(x, pos.y + 4.0), Vector2(x - 6.0 * float(dir.x), pos.y + float(CELL_SIZE) - 4.0), Color(0.70, 0.72, 0.74, 0.35), 1.0)
+				draw_line(Vector2(x, pos.y + 4.0 * ui_scale), Vector2(x - 6.0 * ui_scale * float(dir.x), pos.y + cell_px() - 4.0 * ui_scale), Color(0.70, 0.72, 0.74, 0.35), 1.0)
 			else:
 				var y := pos.y + phase
-				draw_line(Vector2(pos.x + 4.0, y), Vector2(pos.x + float(CELL_SIZE) - 4.0, y - 6.0 * float(dir.y)), Color(0.70, 0.72, 0.74, 0.35), 1.0)
+				draw_line(Vector2(pos.x + 4.0 * ui_scale, y), Vector2(pos.x + cell_px() - 4.0 * ui_scale, y - 6.0 * ui_scale * float(dir.y)), Color(0.70, 0.72, 0.74, 0.35), 1.0)
 
 	for gap_cell in gear_gap_cells:
 		var gp := grid_to_pixel(gap_cell)
-		draw_rect(Rect2(gp + Vector2(2, 2), Vector2(CELL_SIZE - 4, CELL_SIZE - 4)), Color(0.06, 0.06, 0.07, 0.90), true)
-		draw_rect(Rect2(gp + Vector2(2, 2), Vector2(CELL_SIZE - 4, CELL_SIZE - 4)), Color(0.25, 0.25, 0.27, 0.65), false, 1.0)
+		draw_rect(Rect2(gp + Vector2(2.0, 2.0) * ui_scale, Vector2(cell_px() - 4.0 * ui_scale, cell_px() - 4.0 * ui_scale)), Color(0.06, 0.06, 0.07, 0.90), true)
+		draw_rect(Rect2(gp + Vector2(2.0, 2.0) * ui_scale, Vector2(cell_px() - 4.0 * ui_scale, cell_px() - 4.0 * ui_scale)), Color(0.25, 0.25, 0.27, 0.65), false, 1.0)
 
 	for oil_cell in oil_slick_cells:
 		var op := grid_to_pixel(oil_cell)
-		draw_rect(Rect2(op + Vector2(3, 4), Vector2(CELL_SIZE - 6, CELL_SIZE - 8)), Color(0.09, 0.08, 0.08, 0.85), true)
-		draw_line(op + Vector2(5, 9), op + Vector2(CELL_SIZE - 6, 7), Color(0.58, 0.58, 0.62, 0.28), 1.0)
+		draw_rect(Rect2(op + Vector2(3.0, 4.0) * ui_scale, Vector2(cell_px() - 6.0 * ui_scale, cell_px() - 8.0 * ui_scale)), Color(0.09, 0.08, 0.08, 0.85), true)
+		draw_line(op + Vector2(5.0, 9.0) * ui_scale, op + Vector2(cell_px() - 6.0 * ui_scale, 7.0 * ui_scale), Color(0.58, 0.58, 0.62, 0.28), 1.0)
 
 	for tooth_cell in grinding_teeth_cells:
-		var tp := grid_to_pixel(tooth_cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-		draw_circle(tp, CELL_SIZE * 0.30, Color(0.62, 0.62, 0.60, 0.95))
+		var tp := grid_to_pixel(tooth_cell) + Vector2(cell_px() * 0.5, cell_px() * 0.5)
+		draw_circle(tp, cell_px() * 0.30, Color(0.62, 0.62, 0.60, 0.95))
 		for i: int in range(8):
 			var ang := grinder_angle * 1.4 + float(i) * TAU / 8.0
-			var inner := tp + Vector2(cos(ang), sin(ang)) * (CELL_SIZE * 0.28)
-			var outer := tp + Vector2(cos(ang), sin(ang)) * (CELL_SIZE * 0.42)
+			var inner := tp + Vector2(cos(ang), sin(ang)) * (cell_px() * 0.28)
+			var outer := tp + Vector2(cos(ang), sin(ang)) * (cell_px() * 0.42)
 			draw_line(inner, outer, Color(0.82, 0.82, 0.78, 0.92), 2.0)
 
 	if piston_row >= 0:
-		var y := board_origin.y + float(piston_row * CELL_SIZE)
+		var y := board_origin.y + float(piston_row) * cell_px()
 		if piston_telegraph_left > 0.0:
 			var t := 1.0 - clampf(piston_telegraph_left / PISTON_TELEGRAPH_SEC, 0.0, 1.0)
 			var tele_col := Color(0.80, 0.20, 0.14, 0.20 + 0.45 * t)
-			draw_rect(Rect2(board_origin.x, y, board_size.x, CELL_SIZE), tele_col, true)
+			draw_rect(Rect2(board_origin.x, y, board_size.x, cell_px()), tele_col, true)
 			draw_string(hud_font, Vector2(board_origin.x + 10.0, y + 17.0), "PISTON WARNING", HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color("f1c39d"))
 		elif piston_active_left > 0.0:
-			draw_rect(Rect2(board_origin.x, y, board_size.x, CELL_SIZE), Color(0.42, 0.42, 0.44, 0.95), true)
-			draw_rect(Rect2(board_origin.x, y, board_size.x, CELL_SIZE), Color(0.78, 0.78, 0.75, 0.7), false, 2.0)
+			draw_rect(Rect2(board_origin.x, y, board_size.x, cell_px()), Color(0.42, 0.42, 0.44, 0.95), true)
+			draw_rect(Rect2(board_origin.x, y, board_size.x, cell_px()), Color(0.78, 0.78, 0.75, 0.7), false, 2.0)
 
 func draw_background() -> void:
 	var viewport_size := get_viewport_rect().size
@@ -2110,37 +2113,37 @@ func draw_machine_frame() -> void:
 func draw_grid() -> void:
 	for y in GRID_SIZE.y:
 		for x in GRID_SIZE.x:
-			var cell_pos := board_origin + Vector2(x * CELL_SIZE, y * CELL_SIZE)
+			var cell_pos := board_origin + Vector2(x * cell_px(), y * cell_px())
 			var base_color := COLOR_GRID_A if ((x + y) % 2 == 0) else COLOR_GRID_B
-			draw_rect(Rect2(cell_pos, Vector2(CELL_SIZE, CELL_SIZE)), base_color, true)
+			draw_rect(Rect2(cell_pos, Vector2(cell_px(), cell_px())), base_color, true)
 
 			var streak_seed := float((x * 13 + y * 29) % 5)
 			for s: int in range(3):
-				var sy := cell_pos.y + 4.0 + float(s) * 7.0
+				var sy := cell_pos.y + 4.0 * ui_scale + float(s) * 7.0 * ui_scale
 				var alpha := 0.09 + streak_seed * 0.02
 				draw_line(
-					Vector2(cell_pos.x + 2.0, sy),
-					Vector2(cell_pos.x + float(CELL_SIZE) - 2.0, sy),
+					Vector2(cell_pos.x + 2.0 * ui_scale, sy),
+					Vector2(cell_pos.x + cell_px() - 2.0 * ui_scale, sy),
 					Color(COLOR_METAL_BRUSH.r, COLOR_METAL_BRUSH.g, COLOR_METAL_BRUSH.b, alpha),
 					1.0
 				)
 
 			if ((x * 7 + y * 3) % 4) == 0:
 				draw_line(
-					Vector2(cell_pos.x + 5.0, cell_pos.y + 3.0),
-					Vector2(cell_pos.x + 8.0, cell_pos.y + float(CELL_SIZE) - 3.0),
+					Vector2(cell_pos.x + 5.0 * ui_scale, cell_pos.y + 3.0 * ui_scale),
+					Vector2(cell_pos.x + 8.0 * ui_scale, cell_pos.y + cell_px() - 3.0 * ui_scale),
 					COLOR_METAL_SHADOW,
 					1.0
 				)
 
-			draw_rect(Rect2(cell_pos, Vector2(CELL_SIZE, CELL_SIZE)), COLOR_GRID_LINE, false, 1.0)
+			draw_rect(Rect2(cell_pos, Vector2(cell_px(), cell_px())), COLOR_GRID_LINE, false, 1.0)
 
 func draw_grinder() -> void:
 	if grinder_origin.x < 0 or grinder_origin.y < 0:
 		return
 
 	var grinder_pos := grid_to_pixel(grinder_origin)
-	var grinder_size_px := Vector2(float(CELL_SIZE * grinder_size), float(CELL_SIZE * grinder_size))
+	var grinder_size_px := Vector2(cell_px() * float(grinder_size), cell_px() * float(grinder_size))
 	var grinder_rect := Rect2(grinder_pos, grinder_size_px)
 	var center := grinder_rect.position + grinder_rect.size * 0.5
 
@@ -2150,14 +2153,14 @@ func draw_grinder() -> void:
 		var shadow_col := Color(0.05, 0.04, 0.03, 0.24 + 0.12 * pulse)
 		var halo_col := Color(0.20, 0.16, 0.12, 0.20 + 0.10 * pulse)
 		draw_rect(grinder_rect, Color(0.0, 0.0, 0.0, 0.10), true)
-		draw_arc(center + spin_offset, CELL_SIZE * 0.86, 0.0, TAU, 32, shadow_col, 3.0)
-		draw_arc(center - spin_offset, CELL_SIZE * 0.62, 0.0, TAU, 28, halo_col, 2.0)
+		draw_arc(center + spin_offset, cell_px() * 0.86, 0.0, TAU, 32, shadow_col, 3.0)
+		draw_arc(center - spin_offset, cell_px() * 0.62, 0.0, TAU, 28, halo_col, 2.0)
 
 		for i: int in range(4):
 			var ang := grinder_angle + float(i) * PI * 0.5
 			var dir := Vector2(cos(ang), sin(ang))
-			var p0 := center + dir * 6.0
-			var p1 := center + dir * (CELL_SIZE * 0.86)
+			var p0 := center + dir * (6.0 * ui_scale)
+			var p1 := center + dir * (cell_px() * 0.86)
 			draw_line(p0, p1, Color(0.08, 0.07, 0.06, 0.38), 2.0)
 
 		if game_state == GameState.PLAYING:
@@ -2174,14 +2177,14 @@ func draw_grinder() -> void:
 	draw_rect(Rect2(grinder_rect.position + Vector2(2, 2), grinder_rect.size - Vector2(4, 4)), Color("3d3e3d"), false, 1.0)
 
 	# Rotating inner ring and blades.
-	draw_arc(center, CELL_SIZE * 0.82, 0.0, TAU, 36, Color("938d82"), 2.0)
-	draw_arc(center, CELL_SIZE * 0.42, 0.0, TAU, 24, Color("1e1f1f"), 2.0)
+	draw_arc(center, cell_px() * 0.82, 0.0, TAU, 36, Color("938d82"), 2.0)
+	draw_arc(center, cell_px() * 0.42, 0.0, TAU, 24, Color("1e1f1f"), 2.0)
 
 	for i: int in range(4):
 		var ang := grinder_angle + float(i) * PI * 0.5
 		var dir := Vector2(cos(ang), sin(ang))
 		var side := Vector2(-dir.y, dir.x)
-		var tip := center + dir * (CELL_SIZE * 0.76)
+		var tip := center + dir * (cell_px() * 0.76)
 		var inner_l := center + side * 2.5
 		var inner_r := center - side * 2.5
 		draw_colored_polygon([inner_l, tip, inner_r], Color("b9b1a4"))
@@ -2194,17 +2197,17 @@ func draw_idle_beans() -> void:
 	var ticks := float(Time.get_ticks_msec()) * 0.001
 	for bean in idle_beans:
 		var top_left := grid_to_pixel(bean)
-		var center := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+		var center := top_left + Vector2(cell_px() * 0.5, cell_px() * 0.5)
 		var age: float = float(bean_spawn_age.get(bean_key(bean), BEAN_SPAWN_TOTAL))
 		var y_offset := 0.0
 		var alpha := 1.0
 
 		if age < BEAN_SPAWN_SHADOW:
 			var shadow_t := age / BEAN_SPAWN_SHADOW
-			var shadow_w := lerpf(3.0, CELL_SIZE * 0.72, shadow_t)
-			var shadow_h := lerpf(1.0, 4.0, shadow_t)
+			var shadow_w := lerpf(3.0 * ui_scale, cell_px() * 0.72, shadow_t)
+			var shadow_h := lerpf(1.0 * ui_scale, 4.0 * ui_scale, shadow_t)
 			var shadow_col := Color(0.08, 0.06, 0.04, lerpf(0.12, 0.36, shadow_t))
-			draw_rect(Rect2(center + Vector2(-shadow_w * 0.5, CELL_SIZE * 0.36), Vector2(shadow_w, shadow_h)), shadow_col, true)
+			draw_rect(Rect2(center + Vector2(-shadow_w * 0.5, cell_px() * 0.36), Vector2(shadow_w, shadow_h)), shadow_col, true)
 			continue
 
 		if age < BEAN_SPAWN_SHADOW + BEAN_SPAWN_APPEAR:
@@ -2222,7 +2225,7 @@ func draw_idle_beans() -> void:
 			y_offset = lerpf(0.7, 0.0, clampf(settle_t, 0.0, 1.0))
 
 		var shadow_alpha := 0.24 if age >= BEAN_SPAWN_SHADOW + BEAN_SPAWN_APPEAR else 0.15
-		draw_rect(Rect2(center + Vector2(-CELL_SIZE * 0.34, CELL_SIZE * 0.36), Vector2(CELL_SIZE * 0.68, 3.0)), Color(0.09, 0.07, 0.05, shadow_alpha), true)
+		draw_rect(Rect2(center + Vector2(-cell_px() * 0.34, cell_px() * 0.36), Vector2(cell_px() * 0.68, 3.0 * ui_scale)), Color(0.09, 0.07, 0.05, shadow_alpha), true)
 
 		var fill_col := Color(COLOR_FOOD.r, COLOR_FOOD.g, COLOR_FOOD.b, alpha)
 		var hi_col := Color(0.77, 0.54, 0.33, alpha)
@@ -2233,10 +2236,10 @@ func draw_idle_beans() -> void:
 		if age >= BEAN_SPAWN_TOTAL:
 			for i: int in range(3):
 				var t := ticks + float(i) * 0.37 + float(bean.x * 11 + bean.y * 7) * 0.03
-				var drift := Vector2(float(i) * 7.0 + sin(t * 2.2) * 2.0, -12.0 - float(i) * 6.0 - fmod(t * 10.0, 5.0))
+				var drift := Vector2((float(i) * 7.0 + sin(t * 2.2) * 2.0) * ui_scale, (-12.0 - float(i) * 6.0 - fmod(t * 10.0, 5.0)) * ui_scale)
 				var z_alpha := 0.35 + float(i) * 0.22
 				var z_col := Color(COLOR_STEAM.r, COLOR_STEAM.g, COLOR_STEAM.b, z_alpha)
-				draw_string(hud_font, center + drift, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, 14 + i * 3, z_col)
+				draw_string(hud_font, center + drift, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, int(round((14 + i * 3) * ui_scale)), z_col)
 
 func draw_wake_pulses() -> void:
 	for pulse in wake_pulses:
@@ -2302,7 +2305,7 @@ func draw_snake() -> void:
 
 		if i == 0:
 			var eye_color := Color("231910")
-			var eye_base := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+			var eye_base := top_left + Vector2(cell_px() * 0.5, cell_px() * 0.5)
 			if direction == Vector2i.UP:
 				draw_rect(Rect2(eye_base + Vector2(-5, -7), Vector2(3, 3)), eye_color, true)
 				draw_rect(Rect2(eye_base + Vector2(2, -7), Vector2(3, 3)), eye_color, true)
@@ -2317,9 +2320,9 @@ func draw_snake() -> void:
 				draw_rect(Rect2(eye_base + Vector2(4, 2), Vector2(3, 3)), eye_color, true)
 
 func draw_coffee_bean(top_left: Vector2, fill: Color, highlight: Color, seam: Color) -> void:
-	var center := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-	var radius_x := CELL_SIZE * 0.33
-	var radius_y := CELL_SIZE * 0.39
+	var center := top_left + Vector2(cell_px() * 0.5, cell_px() * 0.5)
+	var radius_x := cell_px() * 0.33
+	var radius_y := cell_px() * 0.39
 	var edge_col := Color(0.14, 0.09, 0.06, fill.a)
 	var left_center := center + Vector2(-radius_x + 2.4, 0.0)
 	var right_center := center + Vector2(radius_x - 2.4, 0.0)
@@ -2350,21 +2353,21 @@ func draw_coffee_bean(top_left: Vector2, fill: Color, highlight: Color, seam: Co
 	)
 
 	# Soft specular highlight on the upper-left, like polished roast surface.
-	draw_circle(center + Vector2(-4.0, -3.6), 3.4, Color(highlight.r, highlight.g, highlight.b, highlight.a * 0.9))
+	draw_circle(center + Vector2(-4.0, -3.6) * ui_scale, 3.4 * ui_scale, Color(highlight.r, highlight.g, highlight.b, highlight.a * 0.9))
 	draw_rect(
-		Rect2(center + Vector2(-7.0, -6.6), Vector2(8.4, 2.2)),
+		Rect2(center + Vector2(-7.0, -6.6) * ui_scale, Vector2(8.4, 2.2) * ui_scale),
 		Color(highlight.r, highlight.g, highlight.b, highlight.a * 0.55),
 		true
 	)
 
 	# Curved center crack (bean seam).
-	var seam_top := center + Vector2(-0.8, -7.2)
+	var seam_top := center + Vector2(-0.8, -7.2) * ui_scale
 	for j: int in range(7):
 		var jy := float(j)
 		var xwobble := sin(jy * 0.9) * 1.2
-		var p0 := seam_top + Vector2(xwobble, jy * 2.2)
-		var p1 := seam_top + Vector2(xwobble + 0.6, jy * 2.2 + 1.3)
-		draw_line(p0, p1, seam, 1.1)
+		var p0 := seam_top + Vector2(xwobble, jy * 2.2) * ui_scale
+		var p1 := seam_top + Vector2(xwobble + 0.6, jy * 2.2 + 1.3) * ui_scale
+		draw_line(p0, p1, seam, 1.1 * ui_scale)
 
 func draw_hud() -> void:
 	var viewport_size := get_viewport_rect().size
@@ -2576,7 +2579,7 @@ func draw_pause_menu() -> void:
 
 func draw_centered_panel(title: String, subtitle: String) -> void:
 	var viewport_size := get_viewport_rect().size
-	var panel_size := Vector2(360, 130)
+	var panel_size := Vector2(360.0, 130.0) * ui_scale
 	var panel_pos := (viewport_size - panel_size) * 0.5
 
 	draw_rect(Rect2(panel_pos, panel_size), Color(0.11, 0.08, 0.06, 0.95), true)
@@ -2586,4 +2589,20 @@ func draw_centered_panel(title: String, subtitle: String) -> void:
 	draw_string(hud_font, panel_pos + Vector2(44, 92), subtitle, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
 
 func grid_to_pixel(cell: Vector2i) -> Vector2:
-	return board_origin + Vector2(cell.x * CELL_SIZE, cell.y * CELL_SIZE)
+	return board_origin + Vector2(cell.x * cell_px(), cell.y * cell_px())
+
+func cell_px() -> float:
+	return float(CELL_SIZE) * ui_scale
+
+func _update_ui_scale() -> void:
+	var viewport_size := get_viewport_rect().size
+	var board_w := float(GRID_SIZE.x * CELL_SIZE)
+	var board_h := float(GRID_SIZE.y * CELL_SIZE)
+	var available_w := maxf(320.0, viewport_size.x - BOARD_PADDING * 2.0)
+	var available_h := maxf(240.0, viewport_size.y - HUD_HEIGHT - BOARD_PADDING * 2.0)
+	ui_scale = clampf(minf(available_w / board_w, available_h / board_h), 0.65, 2.0)
+	board_size = Vector2(board_w, board_h) * ui_scale
+	board_origin = Vector2(
+		floor((viewport_size.x - board_size.x) * 0.5),
+		HUD_HEIGHT + BOARD_PADDING
+	)
