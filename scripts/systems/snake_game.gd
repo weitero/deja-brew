@@ -72,7 +72,10 @@ func _ready() -> void:
 
 	set_process(true)
 	set_physics_process(true)
-	start_new_run()
+	snake.clear()
+	idle_beans.clear()
+	wake_pulses.clear()
+	bean_spawn_timer = 0.0
 	game_state = GameState.START_MENU
 
 func start_new_run() -> void:
@@ -565,6 +568,11 @@ func draw_hud() -> void:
 	var speed_text := "Speed: %.1fx" % (0.13 / move_interval)
 	draw_string(hud_font, Vector2(330, 64), speed_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
 
+	if game_state == GameState.PLAYING or game_state == GameState.PAUSED:
+		var next_drop_in: float = maxf(0.0, bean_trickle_interval - bean_spawn_timer)
+		var drop_text := "Next Hopper Drop: %.1fs" % next_drop_in
+		draw_string(hud_font, Vector2(520, 34), drop_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_BRASS)
+
 	var controls := "Arrows / WASD Move   Esc Pause Menu   Enter Select"
 	draw_string(hud_font, Vector2(520, 64), controls, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
 
@@ -589,7 +597,7 @@ func draw_start_menu() -> void:
 
 	for i: int in range(start_menu_options.size()):
 		var y := panel_pos.y + 132.0 + float(i) * 42.0
-		var selected := i == start_menu_index
+		var selected: bool = (i == start_menu_index)
 		if selected:
 			draw_rect(Rect2(panel_pos.x + 30.0, y - 24.0, panel_size.x - 60.0, 30.0), Color(0.45, 0.30, 0.17, 0.45), true)
 			draw_rect(Rect2(panel_pos.x + 30.0, y - 24.0, panel_size.x - 60.0, 30.0), COLOR_BRASS, false, 2.0)
@@ -611,7 +619,7 @@ func draw_pause_menu() -> void:
 
 	for i: int in range(pause_menu_options.size()):
 		var y := panel_pos.y + 132.0 + float(i) * 36.0
-		var selected := i == pause_menu_index
+		var selected: bool = (i == pause_menu_index)
 		if selected:
 			draw_rect(Rect2(panel_pos.x + 32.0, y - 22.0, panel_size.x - 64.0, 28.0), Color(0.45, 0.30, 0.17, 0.45), true)
 			draw_rect(Rect2(panel_pos.x + 32.0, y - 22.0, panel_size.x - 64.0, 28.0), COLOR_BRASS, false, 2.0)
