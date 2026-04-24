@@ -32,7 +32,7 @@ var board_size := Vector2.ZERO
 var snake: Array[Vector2i] = []
 var direction := Vector2i.RIGHT
 var next_direction := Vector2i.RIGHT
-var food := Vector2i.ZERO
+var idle_beans: Array[Vector2i] = []
 var rng := RandomNumberGenerator.new()
 
 var score := 0
@@ -57,6 +57,8 @@ var pause_menu_index := 0
 var start_menu_options := ["START RUN", "QUIT"]
 var pause_menu_options := ["RESUME", "RESTART", "QUIT"]
 var wake_pulses: Array[Dictionary] = []
+var bean_spawn_timer := 0.0
+var bean_trickle_interval := 8.0
 
 func _ready() -> void:
 	rng.randomize()
@@ -87,7 +89,9 @@ func start_new_run() -> void:
 
 	direction = Vector2i.RIGHT
 	next_direction = Vector2i.RIGHT
-	spawn_food()
+	idle_beans.clear()
+	spawn_idle_beans(rng.randi_range(8, 15))
+	bean_spawn_timer = 0.0
 	wake_pulses.clear()
 	queue_redraw()
 
@@ -117,16 +121,41 @@ func activate_pause_option() -> void:
 		2:
 			get_tree().quit()
 
-func spawn_food() -> void:
+func is_idle_bean_at(cell: Vector2i) -> bool:
+	for bean in idle_beans:
+		if bean == cell:
+			return true
+	return false
+
+func remove_idle_bean_at(cell: Vector2i) -> bool:
+	for i: int in range(idle_beans.size()):
+		if idle_beans[i] == cell:
+			idle_beans.remove_at(i)
+			return true
+	return false
+
+func spawn_idle_beans(count: int) -> void:
+	if count <= 0:
+		return
+
 	var occupied := {}
 	for segment in snake:
 		occupied[segment] = true
+	for bean in idle_beans:
+		occupied[bean] = true
 
-	while true:
+	var spawned := 0
+	var attempts := 0
+	var max_attempts := GRID_SIZE.x * GRID_SIZE.y * 3
+
+	while spawned < count and attempts < max_attempts:
+		attempts += 1
 		var candidate := Vector2i(rng.randi_range(0, GRID_SIZE.x - 1), rng.randi_range(0, GRID_SIZE.y - 1))
-		if not occupied.has(candidate):
-			food = candidate
-			return
+		if occupied.has(candidate):
+			continue
+		occupied[candidate] = true
+		idle_beans.append(candidate)
+		spawned += 1
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -219,6 +248,11 @@ func _physics_process(delta: float) -> void:
 		return
 
 	time_alive += delta
+	bean_spawn_timer += delta
+	while bean_spawn_timer >= bean_trickle_interval:
+		bean_spawn_timer -= bean_trickle_interval
+		spawn_idle_beans(rng.randi_range(2, 3))
+
 	move_accumulator += delta
 
 	while move_accumulator >= move_interval:
@@ -285,7 +319,7 @@ func reflected_direction(current_dir: Vector2i, grows: bool) -> Vector2i:
 
 func step_game() -> void:
 	direction = next_direction
-	var grows := (snake[0] + direction) == food
+	var grows := is_idle_bean_at(snake[0] + direction)
 	var new_head := snake[0] + direction
 
 	if is_cell_blocked(new_head, grows):
@@ -295,7 +329,7 @@ func step_game() -> void:
 			return
 		direction = bounced_dir
 		next_direction = bounced_dir
-		grows = (snake[0] + direction) == food
+		grows = is_idle_bean_at(snake[0] + direction)
 		new_head = snake[0] + direction
 
 		if is_cell_blocked(new_head, grows):
@@ -308,8 +342,8 @@ func step_game() -> void:
 		score += 10
 		best_score = max(best_score, score)
 		move_interval = max(0.07, move_interval - 0.0025)
+		remove_idle_bean_at(new_head)
 		spawn_wake_pulse(new_head)
-		spawn_food()
 	else:
 		snake.pop_back()
 
@@ -333,7 +367,7 @@ func _draw() -> void:
 	draw_background()
 	draw_machine_frame()
 	draw_grid()
-	draw_food()
+	draw_idle_beans()
 	draw_snake()
 	draw_wake_pulses()
 	draw_hud()
@@ -432,24 +466,25 @@ func draw_grid() -> void:
 
 			draw_rect(Rect2(cell_pos, Vector2(CELL_SIZE, CELL_SIZE)), COLOR_GRID_LINE, false, 1.0)
 
-func draw_food() -> void:
-	var top_left := grid_to_pixel(food)
-	draw_coffee_bean(
-		top_left,
-		COLOR_FOOD,
-		Color("f1d798"),
-		Color("6a4a2d")
-	)
-
-	# Idle bean marker: drifting zzz glyphs.
+func draw_idle_beans() -> void:
 	var ticks := float(Time.get_ticks_msec()) * 0.001
-	var center := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-	for i: int in range(3):
-		var t := ticks + float(i) * 0.37
-		var drift := Vector2(float(i) * 7.0 + sin(t * 2.2) * 2.0, -12.0 - float(i) * 6.0 - fmod(t * 10.0, 5.0))
-		var alpha := 0.35 + float(i) * 0.22
-		var z_col := Color(COLOR_STEAM.r, COLOR_STEAM.g, COLOR_STEAM.b, alpha)
-		draw_string(hud_font, center + drift, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, 14 + i * 3, z_col)
+	for bean in idle_beans:
+		var top_left := grid_to_pixel(bean)
+		draw_coffee_bean(
+			top_left,
+			COLOR_FOOD,
+			Color("f1d798"),
+			Color("6a4a2d")
+		)
+
+		# Idle bean marker: drifting zzz glyphs.
+		var center := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+		for i: int in range(3):
+			var t := ticks + float(i) * 0.37 + float(bean.x * 11 + bean.y * 7) * 0.03
+			var drift := Vector2(float(i) * 7.0 + sin(t * 2.2) * 2.0, -12.0 - float(i) * 6.0 - fmod(t * 10.0, 5.0))
+			var alpha := 0.35 + float(i) * 0.22
+			var z_col := Color(COLOR_STEAM.r, COLOR_STEAM.g, COLOR_STEAM.b, alpha)
+			draw_string(hud_font, center + drift, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, 14 + i * 3, z_col)
 
 func draw_wake_pulses() -> void:
 	for pulse in wake_pulses:
