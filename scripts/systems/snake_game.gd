@@ -9,9 +9,13 @@ const COLOR_BG_TOP := Color("1d1712")
 const COLOR_BG_BOTTOM := Color("100d0a")
 const COLOR_PANEL := Color("2a2018")
 const COLOR_PANEL_EDGE := Color("674b34")
-const COLOR_GRID_A := Color("241b14")
-const COLOR_GRID_B := Color("2b2119")
-const COLOR_GRID_LINE := Color(0.23, 0.17, 0.13, 0.35)
+const COLOR_GRID_A := Color("4a4d50")
+const COLOR_GRID_B := Color("3f4244")
+const COLOR_GRID_LINE := Color(0.18, 0.16, 0.14, 0.55)
+const COLOR_METAL_BRUSH := Color(0.79, 0.77, 0.72, 0.20)
+const COLOR_METAL_SHADOW := Color(0.18, 0.17, 0.16, 0.22)
+const COLOR_WALL_METAL := Color("57504a")
+const COLOR_WALL_LIP := Color("7a6c5e")
 const COLOR_COPPER := Color("b87333")
 const COLOR_BRASS := Color("d0a45a")
 const COLOR_STEAM := Color("d7c3a6", 0.4)
@@ -195,21 +199,52 @@ func draw_background() -> void:
 		draw_rect(Rect2(px + 2, py - 2, 3, 2), COLOR_STEAM, true)
 
 func draw_machine_frame() -> void:
-	var outer := Rect2(board_origin - Vector2(14, 14), board_size + Vector2(28, 28))
-	draw_rect(outer, COLOR_PANEL_EDGE, true)
-	draw_rect(Rect2(outer.position + Vector2(4, 4), outer.size - Vector2(8, 8)), COLOR_PANEL, true)
+	var frame_outer := Rect2(board_origin - Vector2(22, 22), board_size + Vector2(44, 44))
+	var wall_rect := Rect2(board_origin - Vector2(12, 12), board_size + Vector2(24, 24))
+	var inner_lip := Rect2(board_origin - Vector2(4, 4), board_size + Vector2(8, 8))
 
-	var left_pipe := Rect2(outer.position.x - 18, outer.position.y + 28, 14, outer.size.y - 56)
-	var right_pipe := Rect2(outer.end.x + 4, outer.position.y + 28, 14, outer.size.y - 56)
+	draw_rect(frame_outer, COLOR_PANEL_EDGE, true)
+	draw_rect(wall_rect, COLOR_WALL_METAL, true)
+	draw_rect(inner_lip, COLOR_WALL_LIP, false, 2.0)
+	draw_rect(Rect2(frame_outer.position + Vector2(4, 4), frame_outer.size - Vector2(8, 8)), COLOR_PANEL, false, 1.0)
+
+	var left_pipe := Rect2(frame_outer.position.x - 12, frame_outer.position.y + 16, 10, frame_outer.size.y - 32)
+	var right_pipe := Rect2(frame_outer.end.x + 2, frame_outer.position.y + 16, 10, frame_outer.size.y - 32)
+	var top_pipe := Rect2(frame_outer.position.x + 16, frame_outer.position.y - 12, frame_outer.size.x - 32, 10)
+	var bottom_pipe := Rect2(frame_outer.position.x + 16, frame_outer.end.y + 2, frame_outer.size.x - 32, 10)
+
 	draw_rect(left_pipe, COLOR_COPPER, true)
 	draw_rect(right_pipe, COLOR_COPPER, true)
+	draw_rect(top_pipe, COLOR_COPPER, true)
+	draw_rect(bottom_pipe, COLOR_COPPER, true)
 
-	for i: int in range(6):
-		var rivet_y: float = outer.position.y + 24.0 + float(i) * floor(outer.size.y / 6.0)
-		draw_circle(Vector2(outer.position.x + 9, rivet_y), 2.0, COLOR_BRASS)
-		draw_circle(Vector2(outer.end.x - 9, rivet_y), 2.0, COLOR_BRASS)
-		draw_circle(Vector2(outer.position.x + 9, rivet_y), 0.8, COLOR_PANEL)
-		draw_circle(Vector2(outer.end.x - 9, rivet_y), 0.8, COLOR_PANEL)
+	# Pipe highlights and seams to fake cylindrical metal.
+	draw_line(Vector2(left_pipe.position.x + 2, left_pipe.position.y), Vector2(left_pipe.position.x + 2, left_pipe.end.y), COLOR_BRASS, 1.0)
+	draw_line(Vector2(right_pipe.position.x + 2, right_pipe.position.y), Vector2(right_pipe.position.x + 2, right_pipe.end.y), COLOR_BRASS, 1.0)
+	draw_line(Vector2(top_pipe.position.x, top_pipe.position.y + 2), Vector2(top_pipe.end.x, top_pipe.position.y + 2), COLOR_BRASS, 1.0)
+	draw_line(Vector2(bottom_pipe.position.x, bottom_pipe.position.y + 2), Vector2(bottom_pipe.end.x, bottom_pipe.position.y + 2), COLOR_BRASS, 1.0)
+
+	var rivet_count_x := 12
+	for i: int in range(rivet_count_x):
+		var t := float(i) / float(rivet_count_x - 1)
+		var rx := lerpf(wall_rect.position.x + 14.0, wall_rect.end.x - 14.0, t)
+		var top_rivet := Vector2(rx, wall_rect.position.y + 6.0)
+		var bottom_rivet := Vector2(rx, wall_rect.end.y - 6.0)
+		draw_circle(top_rivet, 2.3, COLOR_BRASS)
+		draw_circle(bottom_rivet, 2.3, COLOR_BRASS)
+		draw_circle(top_rivet, 0.9, COLOR_PANEL)
+		draw_circle(bottom_rivet, 0.9, COLOR_PANEL)
+
+	var rivet_count_y := 8
+	for j: int in range(rivet_count_y):
+		var u := float(j) / float(rivet_count_y - 1)
+		var ry := lerpf(wall_rect.position.y + 14.0, wall_rect.end.y - 14.0, u)
+		var left_rivet := Vector2(wall_rect.position.x + 6.0, ry)
+		var right_rivet := Vector2(wall_rect.end.x - 6.0, ry)
+		draw_circle(left_rivet, 2.3, COLOR_BRASS)
+		draw_circle(right_rivet, 2.3, COLOR_BRASS)
+		draw_circle(left_rivet, 0.9, COLOR_PANEL)
+		draw_circle(right_rivet, 0.9, COLOR_PANEL)
 
 func draw_grid() -> void:
 	for y in GRID_SIZE.y:
@@ -217,6 +252,26 @@ func draw_grid() -> void:
 			var cell_pos := board_origin + Vector2(x * CELL_SIZE, y * CELL_SIZE)
 			var base_color := COLOR_GRID_A if ((x + y) % 2 == 0) else COLOR_GRID_B
 			draw_rect(Rect2(cell_pos, Vector2(CELL_SIZE, CELL_SIZE)), base_color, true)
+
+			var streak_seed := float((x * 13 + y * 29) % 5)
+			for s: int in range(3):
+				var sy := cell_pos.y + 4.0 + float(s) * 7.0
+				var alpha := 0.09 + streak_seed * 0.02
+				draw_line(
+					Vector2(cell_pos.x + 2.0, sy),
+					Vector2(cell_pos.x + float(CELL_SIZE) - 2.0, sy),
+					Color(COLOR_METAL_BRUSH.r, COLOR_METAL_BRUSH.g, COLOR_METAL_BRUSH.b, alpha),
+					1.0
+				)
+
+			if ((x * 7 + y * 3) % 4) == 0:
+				draw_line(
+					Vector2(cell_pos.x + 5.0, cell_pos.y + 3.0),
+					Vector2(cell_pos.x + 8.0, cell_pos.y + float(CELL_SIZE) - 3.0),
+					COLOR_METAL_SHADOW,
+					1.0
+				)
+
 			draw_rect(Rect2(cell_pos, Vector2(CELL_SIZE, CELL_SIZE)), COLOR_GRID_LINE, false, 1.0)
 
 func draw_food() -> void:
