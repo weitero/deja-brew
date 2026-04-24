@@ -916,7 +916,11 @@ func draw_hud() -> void:
 	draw_portafilter_hud(Vector2(520.0, 44.0), dose_count, GRINDER_DOSE_CAP)
 
 	var controls := "Arrows / WASD Move   Esc Pause Menu   Enter Select"
-	draw_string(hud_font, Vector2(520, 64), controls, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+	var footer_y := board_origin.y + board_size.y + 26.0
+	var footer_rect := Rect2(0.0, footer_y - 18.0, viewport_size.x, 28.0)
+	draw_rect(footer_rect, Color(0.12, 0.09, 0.07, 0.75), true)
+	draw_line(Vector2(0.0, footer_rect.position.y), Vector2(viewport_size.x, footer_rect.position.y), COLOR_PANEL_EDGE, 1.0)
+	draw_string(hud_font, Vector2(28.0, footer_y), controls, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
 
 	if game_state == GameState.START_MENU:
 		draw_start_menu()
