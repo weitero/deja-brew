@@ -19,12 +19,17 @@ const COLOR_WALL_LIP := Color("7a6c5e")
 const COLOR_COPPER := Color("b87333")
 const COLOR_BRASS := Color("d0a45a")
 const COLOR_STEAM := Color("d7c3a6", 0.4)
-const COLOR_SNAKE_BODY := Color("91613b")
-const COLOR_SNAKE_HIGHLIGHT := Color("d7a16c")
-const COLOR_SNAKE_HEAD := Color("c4864f")
-const COLOR_FOOD := Color("e2bf77")
+const COLOR_SNAKE_BODY := Color("6e4328")
+const COLOR_SNAKE_HIGHLIGHT := Color("a76a3b")
+const COLOR_SNAKE_HEAD := Color("835231")
+const COLOR_FOOD := Color("9a653b")
 const COLOR_TEXT := Color("e6d8bf")
 const COLOR_DANGER := Color("d36641")
+const BEAN_SPAWN_SHADOW := 0.10
+const BEAN_SPAWN_APPEAR := 0.10
+const BEAN_SPAWN_BOUNCE := 0.14
+const BEAN_SPAWN_SETTLE := 0.08
+const BEAN_SPAWN_TOTAL := BEAN_SPAWN_SHADOW + BEAN_SPAWN_APPEAR + BEAN_SPAWN_BOUNCE + BEAN_SPAWN_SETTLE
 
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
@@ -59,6 +64,7 @@ var pause_menu_options := ["RESUME", "RESTART", "QUIT"]
 var wake_pulses: Array[Dictionary] = []
 var bean_spawn_timer := 0.0
 var bean_trickle_interval := 8.0
+var bean_spawn_age: Dictionary = {}
 
 func _ready() -> void:
 	rng.randomize()
@@ -75,6 +81,7 @@ func _ready() -> void:
 	snake.clear()
 	idle_beans.clear()
 	wake_pulses.clear()
+	bean_spawn_age.clear()
 	bean_spawn_timer = 0.0
 	game_state = GameState.START_MENU
 
@@ -93,10 +100,14 @@ func start_new_run() -> void:
 	direction = Vector2i.RIGHT
 	next_direction = Vector2i.RIGHT
 	idle_beans.clear()
+	bean_spawn_age.clear()
 	spawn_idle_beans(rng.randi_range(8, 15))
 	bean_spawn_timer = 0.0
 	wake_pulses.clear()
 	queue_redraw()
+
+func bean_key(cell: Vector2i) -> String:
+	return "%d:%d" % [cell.x, cell.y]
 
 func spawn_wake_pulse(cell: Vector2i) -> void:
 	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
@@ -134,6 +145,7 @@ func remove_idle_bean_at(cell: Vector2i) -> bool:
 	for i: int in range(idle_beans.size()):
 		if idle_beans[i] == cell:
 			idle_beans.remove_at(i)
+			bean_spawn_age.erase(bean_key(cell))
 			return true
 	return false
 
@@ -158,6 +170,7 @@ func spawn_idle_beans(count: int) -> void:
 			continue
 		occupied[candidate] = true
 		idle_beans.append(candidate)
+		bean_spawn_age[bean_key(candidate)] = 0.0
 		spawned += 1
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -265,19 +278,9 @@ func _physics_process(delta: float) -> void:
 func in_bounds(cell: Vector2i) -> bool:
 	return cell.x >= 0 and cell.y >= 0 and cell.x < GRID_SIZE.x and cell.y < GRID_SIZE.y
 
-func is_cell_blocked(cell: Vector2i, grows: bool) -> bool:
+func is_cell_blocked(cell: Vector2i, _grows: bool) -> bool:
 	if not in_bounds(cell):
 		return true
-
-	# Moving into the current tail cell is allowed if the snake does not grow this step.
-	var body_limit := snake.size()
-	if not grows:
-		body_limit -= 1
-
-	for i: int in range(body_limit):
-		if snake[i] == cell:
-			return true
-
 	return false
 
 func rotate_left(dir: Vector2i) -> Vector2i:
@@ -359,6 +362,10 @@ func trigger_game_over() -> void:
 	queue_redraw()
 
 func _process(delta: float) -> void:
+	for key: String in bean_spawn_age.keys():
+		var age: float = float(bean_spawn_age[key]) + delta
+		bean_spawn_age[key] = minf(age, BEAN_SPAWN_TOTAL)
+
 	for i: int in range(wake_pulses.size() - 1, -1, -1):
 		wake_pulses[i]["ttl"] = float(wake_pulses[i]["ttl"]) - delta
 		if float(wake_pulses[i]["ttl"]) <= 0.0:
@@ -473,21 +480,49 @@ func draw_idle_beans() -> void:
 	var ticks := float(Time.get_ticks_msec()) * 0.001
 	for bean in idle_beans:
 		var top_left := grid_to_pixel(bean)
-		draw_coffee_bean(
-			top_left,
-			COLOR_FOOD,
-			Color("f1d798"),
-			Color("6a4a2d")
-		)
-
-		# Idle bean marker: drifting zzz glyphs.
 		var center := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-		for i: int in range(3):
-			var t := ticks + float(i) * 0.37 + float(bean.x * 11 + bean.y * 7) * 0.03
-			var drift := Vector2(float(i) * 7.0 + sin(t * 2.2) * 2.0, -12.0 - float(i) * 6.0 - fmod(t * 10.0, 5.0))
-			var alpha := 0.35 + float(i) * 0.22
-			var z_col := Color(COLOR_STEAM.r, COLOR_STEAM.g, COLOR_STEAM.b, alpha)
-			draw_string(hud_font, center + drift, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, 14 + i * 3, z_col)
+		var age: float = float(bean_spawn_age.get(bean_key(bean), BEAN_SPAWN_TOTAL))
+		var y_offset := 0.0
+		var alpha := 1.0
+
+		if age < BEAN_SPAWN_SHADOW:
+			var shadow_t := age / BEAN_SPAWN_SHADOW
+			var shadow_w := lerpf(3.0, CELL_SIZE * 0.72, shadow_t)
+			var shadow_h := lerpf(1.0, 4.0, shadow_t)
+			var shadow_col := Color(0.08, 0.06, 0.04, lerpf(0.12, 0.36, shadow_t))
+			draw_rect(Rect2(center + Vector2(-shadow_w * 0.5, CELL_SIZE * 0.36), Vector2(shadow_w, shadow_h)), shadow_col, true)
+			continue
+
+		if age < BEAN_SPAWN_SHADOW + BEAN_SPAWN_APPEAR:
+			var appear_t := (age - BEAN_SPAWN_SHADOW) / BEAN_SPAWN_APPEAR
+			y_offset = lerpf(-8.0, -2.0, appear_t)
+			alpha = appear_t
+		elif age < BEAN_SPAWN_SHADOW + BEAN_SPAWN_APPEAR + BEAN_SPAWN_BOUNCE:
+			var bounce_t := (age - BEAN_SPAWN_SHADOW - BEAN_SPAWN_APPEAR) / BEAN_SPAWN_BOUNCE
+			if bounce_t < 0.5:
+				y_offset = lerpf(-2.0, 3.0, bounce_t * 2.0)
+			else:
+				y_offset = lerpf(3.0, 0.0, (bounce_t - 0.5) * 2.0)
+		else:
+			var settle_t := (age - BEAN_SPAWN_SHADOW - BEAN_SPAWN_APPEAR - BEAN_SPAWN_BOUNCE) / BEAN_SPAWN_SETTLE
+			y_offset = lerpf(0.7, 0.0, clampf(settle_t, 0.0, 1.0))
+
+		var shadow_alpha := 0.24 if age >= BEAN_SPAWN_SHADOW + BEAN_SPAWN_APPEAR else 0.15
+		draw_rect(Rect2(center + Vector2(-CELL_SIZE * 0.34, CELL_SIZE * 0.36), Vector2(CELL_SIZE * 0.68, 3.0)), Color(0.09, 0.07, 0.05, shadow_alpha), true)
+
+		var fill_col := Color(COLOR_FOOD.r, COLOR_FOOD.g, COLOR_FOOD.b, alpha)
+		var hi_col := Color(0.77, 0.54, 0.33, alpha)
+		var seam_col := Color(0.25, 0.16, 0.10, alpha)
+		draw_coffee_bean(top_left + Vector2(0.0, y_offset), fill_col, hi_col, seam_col)
+
+		# Only fully-settled beans emit the idle zzz marker.
+		if age >= BEAN_SPAWN_TOTAL:
+			for i: int in range(3):
+				var t := ticks + float(i) * 0.37 + float(bean.x * 11 + bean.y * 7) * 0.03
+				var drift := Vector2(float(i) * 7.0 + sin(t * 2.2) * 2.0, -12.0 - float(i) * 6.0 - fmod(t * 10.0, 5.0))
+				var z_alpha := 0.35 + float(i) * 0.22
+				var z_col := Color(COLOR_STEAM.r, COLOR_STEAM.g, COLOR_STEAM.b, z_alpha)
+				draw_string(hud_font, center + drift, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, 14 + i * 3, z_col)
 
 func draw_wake_pulses() -> void:
 	for pulse in wake_pulses:
@@ -511,7 +546,7 @@ func draw_snake() -> void:
 		var top_left := grid_to_pixel(segment)
 		var body_color := COLOR_SNAKE_HEAD if i == 0 else COLOR_SNAKE_BODY
 		var highlight := COLOR_SNAKE_HIGHLIGHT if i == 0 else COLOR_COPPER
-		var seam_color := Color("3a2718") if i == 0 else Color("4b3321")
+		var seam_color := Color("2f1c11") if i == 0 else Color("3a2416")
 
 		draw_coffee_bean(top_left, body_color, highlight, seam_color)
 
@@ -533,25 +568,53 @@ func draw_snake() -> void:
 
 func draw_coffee_bean(top_left: Vector2, fill: Color, highlight: Color, seam: Color) -> void:
 	var center := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-	var radius_x := CELL_SIZE * 0.34
-	var radius_y := CELL_SIZE * 0.40
+	var radius_x := CELL_SIZE * 0.33
+	var radius_y := CELL_SIZE * 0.39
+	var edge_col := Color(0.14, 0.09, 0.06, fill.a)
+	var left_center := center + Vector2(-radius_x + 2.4, 0.0)
+	var right_center := center + Vector2(radius_x - 2.4, 0.0)
 
-	# Bean silhouette built from a core plus rounded ends.
-	draw_rect(Rect2(center + Vector2(-radius_x + 2.0, -radius_y), Vector2(radius_x * 2.0 - 4.0, radius_y * 2.0)), fill, true)
-	draw_circle(center + Vector2(-radius_x + 2.0, 0.0), radius_y, fill)
-	draw_circle(center + Vector2(radius_x - 2.0, 0.0), radius_y, fill)
+	# Bean body: two lobes and a center bridge for a natural bean silhouette.
+	draw_circle(left_center, radius_y, fill)
+	draw_circle(right_center, radius_y, fill)
+	draw_rect(
+		Rect2(
+			center + Vector2(-radius_x + 2.4, -radius_y + 1.2),
+			Vector2((radius_x - 2.4) * 2.0, (radius_y - 1.2) * 2.0)
+		),
+		fill,
+		true
+	)
 
-	# Metallic warm highlight.
-	draw_rect(Rect2(center + Vector2(-radius_x + 4.0, -radius_y + 2.0), Vector2(radius_x * 1.45, 3.0)), highlight, true)
-	draw_circle(center + Vector2(-radius_x + 3.0, -1.0), 3.0, highlight)
+	# Edge darkening makes the bean read as rounded and glossy.
+	draw_arc(left_center, radius_y, PI * 0.72, PI * 1.35, 14, edge_col, 1.2)
+	draw_arc(right_center, radius_y, -PI * 0.35, PI * 0.35, 14, edge_col, 1.2)
+	draw_rect(
+		Rect2(
+			center + Vector2(-radius_x + 1.8, -radius_y + 0.8),
+			Vector2((radius_x - 1.8) * 2.0, (radius_y - 0.8) * 2.0)
+		),
+		edge_col,
+		false,
+		1.0
+	)
 
-	# Center groove for coffee-bean identity.
-	for j: int in range(5):
-		var offset := -4.0 + float(j) * 2.0
-		draw_line(center + Vector2(offset * 0.35, -6.0 + float(j) * 3.0), center + Vector2(offset * 0.65, -2.5 + float(j) * 3.0), seam, 1.0)
+	# Soft specular highlight on the upper-left, like polished roast surface.
+	draw_circle(center + Vector2(-4.0, -3.6), 3.4, Color(highlight.r, highlight.g, highlight.b, highlight.a * 0.9))
+	draw_rect(
+		Rect2(center + Vector2(-7.0, -6.6), Vector2(8.4, 2.2)),
+		Color(highlight.r, highlight.g, highlight.b, highlight.a * 0.55),
+		true
+	)
 
-	# Pixel-ish border.
-	draw_rect(Rect2(center + Vector2(-radius_x + 1.0, -radius_y), Vector2(radius_x * 2.0 - 2.0, radius_y * 2.0)), Color(0.16, 0.11, 0.08, 0.85), false, 1.0)
+	# Curved center crack (bean seam).
+	var seam_top := center + Vector2(-0.8, -7.2)
+	for j: int in range(7):
+		var jy := float(j)
+		var xwobble := sin(jy * 0.9) * 1.2
+		var p0 := seam_top + Vector2(xwobble, jy * 2.2)
+		var p1 := seam_top + Vector2(xwobble + 0.6, jy * 2.2 + 1.3)
+		draw_line(p0, p1, seam, 1.1)
 
 func draw_hud() -> void:
 	var viewport_size := get_viewport_rect().size
