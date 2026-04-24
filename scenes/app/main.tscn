@@ -1,7 +1,11 @@
-[gd_scene load_steps=2 format=3]
+[gd_scene load_steps=3 format=3]
 
 [ext_resource type="PackedScene" path="res://scenes/gameplay/run_root.tscn" id="1_run_root"]
+[ext_resource type="Script" path="res://scripts/autoload/audio_manager.gd" id="2_audio"]
 
 [node name="Main" type="Node"]
+
+[node name="AudioManager" type="Node" parent="."]
+script = ExtResource("2_audio")
 
 [node name="RunRoot" parent="." instance=ExtResource("1_run_root")]

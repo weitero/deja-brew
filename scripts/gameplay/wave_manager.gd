@@ -33,7 +33,7 @@ const LEVEL_CLEAR_SEC   := 3.5
 const LEVEL_DATA := {
 	"level_1_hopper": {
 		"display_name": "The Hopper",
-		"target_score": 300,
+		"target_score": 720,
 		## ~45 px/s (75 % of the 0.13 normal interval).
 		"base_move_interval": 0.175,
 		## 3 x 3 blade zone makes the grinder easier to hit (tutorial).
@@ -59,7 +59,7 @@ const LEVEL_DATA := {
 				"initial_batch": 12,
 				"trickle_per_rotation": 2,
 				"blade_relocates": 0,
-				"wave_score_target": 200,
+				"wave_score_target": 360,
 			},
 			{
 				"name": "The Rush",
@@ -67,7 +67,7 @@ const LEVEL_DATA := {
 				"trickle_per_rotation": 3,
 				## Blade relocates once mid-wave (handled by run_manager).
 				"blade_relocates": 1,
-				"wave_score_target": 300,
+				"wave_score_target": 720,
 			},
 		],
 	},

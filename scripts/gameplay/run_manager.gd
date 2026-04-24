@@ -83,6 +83,8 @@ const WATER_EXPOSURE_LIMIT        := 2.0    ## seconds in water before bean loss
 ## Pressure Release (L3)
 const PRESSURE_RELEASE_TELEGRAPH_SEC := 2.0
 const PRESSURE_RELEASE_PUSH_CELLS   := 2
+const SCREEN_SHAKE_DECAY := 34.0
+const HIT_FREEZE_SCALE := 0.08
 
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
@@ -111,6 +113,7 @@ var hud_font: Font
 
 enum GameState {
 	START_MENU,
+	TUTORIAL,
 	PLAYING,
 	PAUSED,
 	GAME_OVER,
@@ -120,7 +123,7 @@ enum GameState {
 var game_state: GameState = GameState.START_MENU
 var start_menu_index := 0
 var pause_menu_index := 0
-var start_menu_options := ["START RUN", "QUIT"]
+var start_menu_options := ["START RUN", "TUTORIAL", "QUIT"]
 var pause_menu_options := ["RESUME", "RESTART", "QUIT"]
 var wake_pulses: Array[Dictionary] = []
 var bean_spawn_timer := 0.0
@@ -209,6 +212,16 @@ var pressure_release_telegraph_timer: float = 0.0
 var pressure_vent_side: int = 0   ## 0=left→R  1=right→L  2=top→D  3=bottom→U
 ## Mid-wave blade relocation: 0=none  -1=every 15 s  N=N remaining relocations.
 var mid_wave_relocations_remaining: int = 0
+var wave_score_at_start := 0
+var screen_shake_strength := 0.0
+var screen_shake_time := 0.0
+var draw_shake_offset := Vector2.ZERO
+var hit_freeze_left := 0.0
+var grind_vfx_cooldown := 0.0
+var grind_particles: GPUParticles2D
+var rally_particles: GPUParticles2D
+var steam_particles: GPUParticles2D
+var god_shot_particles: GPUParticles2D
 
 func _ready() -> void:
 	wave_mgr = WaveManagerScript.new()
@@ -282,8 +295,13 @@ func _ready() -> void:
 	arm_line_index = -1
 	arm_push_dir = Vector2i.RIGHT
 	arm_applied = false
+	_setup_juice_nodes()
+	_audio_call("start_ambience")
 	game_state = GameState.START_MENU
 	best_score = max(best_score, saved_high_score)
+
+func _exit_tree() -> void:
+	Engine.time_scale = 1.0
 
 func load_high_score() -> void:
 	var save_file := ConfigFile.new()
@@ -379,6 +397,13 @@ func start_new_run() -> void:
 	pressure_release_telegraph_timer = 0.0
 	pressure_vent_side           = 0
 	mid_wave_relocations_remaining = 0
+	wave_score_at_start = score
+	screen_shake_strength = 0.0
+	screen_shake_time = 0.0
+	draw_shake_offset = Vector2.ZERO
+	hit_freeze_left = 0.0
+	grind_vfx_cooldown = 0.0
+	Engine.time_scale = 1.0
 
 	# Begin the first wave — fires wave_started signal which spawns the initial batch.
 	wave_mgr.begin_level()
@@ -627,6 +652,8 @@ func trigger_piston_telegraph() -> void:
 func trigger_piston_slam() -> void:
 	piston_active_left = PISTON_ACTIVE_SEC
 	piston_telegraph_left = 0.0
+	trigger_screen_shake(10.0, 0.2)
+	_audio_call("play_hazard", [board_origin + board_size * 0.5])
 
 	for i: int in range(1, snake.size()):
 		if snake[i].y == piston_row:
@@ -824,14 +851,14 @@ func extraction_multiplier(seconds: float) -> float:
 
 func extraction_label(seconds: float) -> String:
 	if seconds <= 15.0:
-		return "Sour pull"
+		return "Sour extraction"
 	if seconds <= 20.0:
-		return "Early pull"
+		return "Early extraction"
 	if seconds <= 29.0:
-		return "Perfetto"
+		return "Perfect extraction"
 	if seconds <= 35.0:
-		return "Late pull"
-	return "Bitter auto-pull"
+		return "Late extraction"
+	return "Bitter auto-extraction"
 
 func finalize_extraction(auto_pull: bool) -> void:
 	if not extraction_active:
@@ -848,8 +875,13 @@ func finalize_extraction(auto_pull: bool) -> void:
 		score += 500
 		freshness = minf(100.0, freshness + 15.0)
 		extraction_feedback = "GOD SHOT!"
+		emit_god_shot_burst(board_origin + board_size * 0.5)
+		trigger_screen_shake(11.0, 0.22)
+		trigger_hit_freeze(0.08)
+		_audio_call("play_god_shot")
 	else:
 		extraction_feedback = extraction_label(extraction_timer)
+		_audio_call("play_extraction")
 
 	update_adaptive_difficulty()
 	extraction_feedback_ttl = 1.8
@@ -874,6 +906,9 @@ func trigger_rally_call() -> void:
 	if game_state != GameState.PLAYING or rally_cooldown_left > 0.0 or snake.is_empty():
 		return
 	rally_cooldown_left = RALLY_COOLDOWN_SEC
+	emit_rally_burst(grid_to_pixel(snake[0]) + Vector2(cell_px() * 0.5, cell_px() * 0.5))
+	_audio_call("play_rally", [grid_to_pixel(snake[0])])
+	trigger_screen_shake(4.0, 0.12)
 	var head := snake[0]
 	var recruited: Array[Vector2i] = []
 	var recruited_broken: Array[Vector2i] = []
@@ -984,6 +1019,7 @@ func begin_grind_sequence() -> void:
 	if is_grinding or snake.is_empty():
 		return
 	is_grinding = true
+	_audio_call("play_grind", [grid_to_pixel(snake[0])])
 	grind_step_timer = 0.0
 	grind_grounded_count = 0
 	grind_wasted_count = 0
@@ -1058,6 +1094,8 @@ func activate_start_option() -> void:
 	if start_menu_index == 0:
 		start_new_run()
 		game_state = GameState.PLAYING
+	elif start_menu_index == 1:
+		game_state = GameState.TUTORIAL
 	else:
 		get_tree().quit()
 
@@ -1206,13 +1244,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		if game_state == GameState.START_MENU:
 			if key_event.keycode == KEY_UP or key_event.keycode == KEY_W:
 				start_menu_index = posmod(start_menu_index - 1, start_menu_options.size())
+				_audio_call("play_menu_move")
 				queue_redraw()
 				return
 			if key_event.keycode == KEY_DOWN or key_event.keycode == KEY_S:
 				start_menu_index = posmod(start_menu_index + 1, start_menu_options.size())
+				_audio_call("play_menu_move")
 				queue_redraw()
 				return
 			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
+				_audio_call("play_menu_confirm")
 				activate_start_option()
 				return
 
@@ -1227,25 +1268,37 @@ func _unhandled_input(event: InputEvent) -> void:
 			elif game_state == GameState.START_MENU:
 				get_tree().quit()
 				return
+			elif game_state == GameState.TUTORIAL:
+				game_state = GameState.START_MENU
+				return
 			elif game_state == GameState.LEVEL_COMPLETE:
+				game_state = GameState.START_MENU
+				return
+
+		if game_state == GameState.TUTORIAL:
+			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER or key_event.keycode == KEY_BACKSPACE:
 				game_state = GameState.START_MENU
 				return
 
 		if game_state == GameState.PAUSED:
 			if key_event.keycode == KEY_UP or key_event.keycode == KEY_W:
 				pause_menu_index = posmod(pause_menu_index - 1, pause_menu_options.size())
+				_audio_call("play_menu_move")
 				queue_redraw()
 				return
 			if key_event.keycode == KEY_DOWN or key_event.keycode == KEY_S:
 				pause_menu_index = posmod(pause_menu_index + 1, pause_menu_options.size())
+				_audio_call("play_menu_move")
 				queue_redraw()
 				return
 			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
+				_audio_call("play_menu_confirm")
 				activate_pause_option()
 				return
 
 		if game_state == GameState.GAME_OVER:
 			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
+				_audio_call("play_menu_confirm")
 				start_new_run()
 				game_state = GameState.PLAYING
 				return
@@ -1255,6 +1308,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 		if game_state == GameState.LEVEL_COMPLETE:
 			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
+				_audio_call("play_menu_confirm")
 				_advance_to_next_level()
 				start_new_run()
 				game_state = GameState.PLAYING
@@ -1268,6 +1322,7 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 
 		if game_state == GameState.PLAYING and (key_event.keycode == KEY_E or key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER):
+			_audio_call("play_extraction")
 			finalize_extraction(false)
 			return
 
@@ -1312,6 +1367,7 @@ func try_set_direction(candidate: Vector2i) -> void:
 			rotten_segment_indices.clear()
 			extraction_feedback = "Rot purged"
 			extraction_feedback_ttl = 1.1
+			trigger_screen_shake(5.0, 0.14)
 	next_direction = candidate
 
 func _physics_process(delta: float) -> void:
@@ -1526,6 +1582,8 @@ func step_game() -> void:
 	if is_cell_blocked(new_head, grows):
 		if blocked_by_pebble and snake.size() > 1:
 			scatter_on_hazard_contact()
+			_audio_call("play_hazard", [grid_to_pixel(snake[0])])
+			trigger_screen_shake(9.0, 0.18)
 		var bounced_dir := reflected_direction(direction, grows)
 		if bounced_dir == Vector2i.ZERO:
 			queue_redraw()
@@ -1554,6 +1612,7 @@ func step_game() -> void:
 			remove_idle_bean_at(new_head)
 			spawn_wake_pulse(new_head)
 		begin_grind_sequence()
+		trigger_hit_freeze(0.05)
 		queue_redraw()
 		return
 
@@ -1572,6 +1631,7 @@ func step_game() -> void:
 		remove_rotten_bean_at(new_head)
 		infect_nearest_chain_beans(2)
 		spawn_wake_pulse(new_head)
+		emit_steam_plume(grid_to_pixel(new_head) + Vector2(cell_px() * 0.5, cell_px() * 0.5))
 
 	# Water puddle: grant Washed buff on each step through a puddle cell.
 	if water_puddles_enabled and is_water_puddle_at(new_head):
@@ -1581,6 +1641,9 @@ func step_game() -> void:
 
 	if is_cell_in_list(new_head, grinding_teeth_cells):
 		scatter_on_hazard_contact()
+		_audio_call("play_hazard", [grid_to_pixel(new_head)])
+		trigger_screen_shake(12.0, 0.22)
+		trigger_hit_freeze(0.06)
 
 	if is_cell_in_list(new_head, oil_slick_cells):
 		oil_slick_timer = OIL_SLICK_SLIDE_SEC
@@ -1598,6 +1661,8 @@ func trigger_game_over() -> void:
 	extraction_base_score = 0
 	grind_grounded_count = 0
 	grind_wasted_count = 0
+	_audio_call("play_game_over")
+	trigger_screen_shake(12.0, 0.25)
 	best_score = max(best_score, score)
 	save_high_score_if_needed()
 	queue_redraw()
@@ -1640,6 +1705,7 @@ func is_water_puddle_at(cell: Vector2i) -> bool:
 func trigger_pressure_release_telegraph() -> void:
 	pressure_vent_side               = rng.randi_range(0, 3)
 	pressure_release_telegraph_timer = PRESSURE_RELEASE_TELEGRAPH_SEC
+	emit_steam_plume(board_origin + board_size * 0.5)
 
 
 func apply_pressure_release() -> void:
@@ -1673,6 +1739,8 @@ func apply_pressure_release() -> void:
 	# If the push landed the head on an active grinder, start grinding immediately.
 	if not snake.is_empty() and grinder_active and is_grinder_cell(snake[0]):
 		begin_grind_sequence()
+	trigger_screen_shake(8.0, 0.2)
+	_audio_call("play_hazard", [board_origin + board_size * 0.5])
 	queue_redraw()
 
 
@@ -1702,6 +1770,7 @@ func _apply_level_config() -> void:
 func _on_wave_started(wave_idx: int, _wave_name: String, initial_batch: int, trickle: int) -> void:
 	current_trickle_per_rotation = trickle
 	bean_spawn_timer             = 0.0
+	wave_score_at_start = score
 
 	# Configure mid-wave blade relocation from the wave config.
 	var wave_cfg: Dictionary    = wave_mgr.get_current_wave_config()
@@ -1730,6 +1799,7 @@ func _on_wave_started(wave_idx: int, _wave_name: String, initial_batch: int, tri
 	if pressure_release_enabled:
 		pressure_release_timer           = active_pressure_interval
 		pressure_release_telegraph_timer = 0.0
+	_audio_call("play_wave_start")
 
 	spawn_idle_beans(initial_batch)
 
@@ -1752,7 +1822,16 @@ func _on_level_cleared(_lid: String) -> void:
 func check_wave_completion() -> void:
 	if not wave_mgr.is_playing():
 		return
-	if score >= wave_mgr.get_wave_score_target():
+	var current_wave_idx := wave_mgr.get_display_wave_number() - 1
+	var current_cfg: Dictionary = wave_mgr.get_wave_config(current_wave_idx)
+	var current_target := int(current_cfg.get("wave_score_target", wave_mgr.get_wave_score_target()))
+	var previous_target := 0
+	if current_wave_idx > 0:
+		var previous_cfg: Dictionary = wave_mgr.get_wave_config(current_wave_idx - 1)
+		previous_target = int(previous_cfg.get("wave_score_target", 0))
+	var required_gain := maxi(1, current_target - previous_target)
+	var gained_this_wave := score - wave_score_at_start
+	if score >= current_target and gained_this_wave >= required_gain:
 		wave_mgr.complete_wave()
 
 
@@ -1836,6 +1915,28 @@ func _process(delta: float) -> void:
 	if game_state == GameState.PLAYING or game_state == GameState.LEVEL_COMPLETE or wave_mgr.is_in_banner():
 		grinder_angle += delta * 3.0
 
+	if hit_freeze_left > 0.0:
+		hit_freeze_left = maxf(0.0, hit_freeze_left - delta)
+		if hit_freeze_left <= 0.0:
+			Engine.time_scale = 1.0
+
+	if grind_vfx_cooldown > 0.0:
+		grind_vfx_cooldown = maxf(0.0, grind_vfx_cooldown - delta)
+
+	if screen_shake_time > 0.0:
+		screen_shake_time = maxf(0.0, screen_shake_time - delta)
+		screen_shake_strength = maxf(0.0, screen_shake_strength - SCREEN_SHAKE_DECAY * delta)
+		draw_shake_offset = Vector2(
+			rng.randf_range(-screen_shake_strength, screen_shake_strength),
+			rng.randf_range(-screen_shake_strength, screen_shake_strength)
+		)
+	else:
+		draw_shake_offset = Vector2.ZERO
+
+	if game_state == GameState.PLAYING:
+		var cycle_t := 1.0 - clampf(burr_timer / maxf(active_burr_interval, 0.001), 0.0, 1.0)
+		_audio_call("set_machine_intensity", [cycle_t])
+
 	if extraction_feedback_ttl > 0.0:
 		extraction_feedback_ttl = maxf(0.0, extraction_feedback_ttl - delta)
 
@@ -1852,6 +1953,9 @@ func _process(delta: float) -> void:
 		grind_pops[i]["ttl"] = float(grind_pops[i]["ttl"]) - delta
 		if float(grind_pops[i]["ttl"]) <= 0.0:
 			grind_pops.remove_at(i)
+		elif grind_vfx_cooldown <= 0.0:
+			emit_grind_burst(Vector2(grind_pops[i]["position"]))
+			grind_vfx_cooldown = 0.06
 
 	for i: int in range(waste_spills.size() - 1, -1, -1):
 		var ttl: float = float(waste_spills[i]["ttl"]) - delta
@@ -1882,6 +1986,7 @@ func update_adaptive_difficulty() -> void:
 		adaptive_enemy_speed = 1.0
 
 func _draw() -> void:
+	draw_set_transform(draw_shake_offset, 0.0, Vector2.ONE)
 	draw_background()
 	draw_machine_frame()
 	draw_grid()
@@ -1898,6 +2003,80 @@ func _draw() -> void:
 	draw_pressure_release_fx()
 	draw_hud()
 	draw_wave_banner()
+	draw_set_transform(Vector2.ZERO, 0.0, Vector2.ONE)
+
+func _audio_manager() -> Node:
+	var main := get_tree().root.get_node_or_null("Main")
+	if main == null:
+		return null
+	return main.get_node_or_null("AudioManager")
+
+func _audio_call(method: String, args: Array = []) -> void:
+	var am := _audio_manager()
+	if am != null and am.has_method(method):
+		am.callv(method, args)
+
+func _setup_juice_nodes() -> void:
+	grind_particles = _create_particles("GrindParticles", Color(0.73, 0.57, 0.37, 0.95), 26, 0.34, "res://assets/art/fx/particle_grind.png")
+	rally_particles = _create_particles("RallyParticles", Color(0.95, 0.76, 0.42, 0.95), 18, 0.42, "res://assets/art/fx/particle_rally_ring.png")
+	steam_particles = _create_particles("SteamParticles", Color(0.84, 0.92, 1.0, 0.7), 22, 0.58, "res://assets/art/fx/particle_steam.png")
+	god_shot_particles = _create_particles("GodShotParticles", Color(1.0, 0.90, 0.42, 0.98), 42, 0.7, "res://assets/art/fx/particle_god_shot.png")
+
+func _create_particles(name: String, col: Color, amount: int, lifetime: float, texture_path: String) -> GPUParticles2D:
+	var p := GPUParticles2D.new()
+	p.name = name
+	p.one_shot = true
+	p.amount = amount
+	p.lifetime = lifetime
+	p.explosiveness = 0.9
+	p.randomness = 0.75
+	var tex := load(texture_path)
+	if tex is Texture2D:
+		p.texture = tex as Texture2D
+	p.process_material = ParticleProcessMaterial.new()
+	var mat := p.process_material as ParticleProcessMaterial
+	mat.direction = Vector3(0.0, -1.0, 0.0)
+	mat.spread = 55.0
+	mat.gravity = Vector3(0.0, 280.0, 0.0)
+	mat.initial_velocity_min = 40.0
+	mat.initial_velocity_max = 140.0
+	mat.scale_min = 1.2
+	mat.scale_max = 2.6
+	mat.color = col
+	add_child(p)
+	return p
+
+func emit_grind_burst(world_pos: Vector2) -> void:
+	if grind_particles == null:
+		return
+	grind_particles.position = world_pos
+	grind_particles.restart()
+
+func emit_rally_burst(world_pos: Vector2) -> void:
+	if rally_particles == null:
+		return
+	rally_particles.position = world_pos
+	rally_particles.restart()
+
+func emit_steam_plume(world_pos: Vector2) -> void:
+	if steam_particles == null:
+		return
+	steam_particles.position = world_pos
+	steam_particles.restart()
+
+func emit_god_shot_burst(world_pos: Vector2) -> void:
+	if god_shot_particles == null:
+		return
+	god_shot_particles.position = world_pos
+	god_shot_particles.restart()
+
+func trigger_screen_shake(strength: float, duration: float) -> void:
+	screen_shake_strength = maxf(screen_shake_strength, strength)
+	screen_shake_time = maxf(screen_shake_time, duration)
+
+func trigger_hit_freeze(duration: float) -> void:
+	hit_freeze_left = maxf(hit_freeze_left, duration)
+	Engine.time_scale = HIT_FREEZE_SCALE
 
 ## Draws blue water-puddle pools on the field (L2 + L3 feature).
 func draw_water_puddles() -> void:
@@ -2429,22 +2608,10 @@ func draw_hud() -> void:
 	draw_rect(Rect2(rally_bar.position + Vector2(2.0, 2.0), Vector2((rally_bar.size.x - 4.0) * rally_ratio, rally_bar.size.y - 4.0)), Color("8c5c36"), true)
 	draw_string(hud_font, Vector2(388.0, rally_row_y), rally_state, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_TEXT)
 
-	var burr_left := burr_timer
-	var piston_left := piston_timer if piston_telegraph_left <= 0.0 and piston_active_left <= 0.0 else (piston_telegraph_left if piston_telegraph_left > 0.0 else piston_active_left)
-	var piston_state := "Idle"
-	if piston_telegraph_left > 0.0:
-		piston_state = "Warn"
-	elif piston_active_left > 0.0:
-		piston_state = "Slam"
-	var slip_state := "SLIP" if oil_slick_timer > 0.0 else "Grip"
-	draw_string(hud_font, Vector2(470.0, rally_row_y), "Gear", HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
-	draw_string(hud_font, Vector2(510.0, rally_row_y), "%.1fs" % burr_left, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_BRASS)
-	draw_string(hud_font, Vector2(610.0, rally_row_y), "Piston %s %.1fs" % [piston_state, piston_left], HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
-	draw_string(hud_font, Vector2(790.0, rally_row_y), "Oil %s" % slip_state, HORIZONTAL_ALIGNMENT_LEFT, -1, 15, COLOR_TEXT)
 	if pressure_release_enabled:
 		var steam_left := pressure_release_timer if pressure_release_telegraph_timer <= 0.0 else pressure_release_telegraph_timer
 		var steam_label := "Steam %.1fs" % steam_left
-		draw_string(hud_font, Vector2(858.0, rally_row_y), steam_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color("a8d4e8"))
+		draw_string(hud_font, Vector2(640.0, rally_row_y), steam_label, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, Color("a8d4e8"))
 
 	if extraction_active:
 		var cup_rect := Rect2(860.0, 12.0, 78.0, 58.0)
@@ -2465,7 +2632,7 @@ func draw_hud() -> void:
 		draw_rect(cup_rect, COLOR_PANEL_EDGE, false, 2.0)
 		var fill_h := (cup_rect.size.y - 10.0) * cup_fill_ratio
 		draw_rect(Rect2(cup_rect.position.x + 5.0, cup_rect.end.y - 5.0 - fill_h, cup_rect.size.x - 10.0, fill_h), cup_col, true)
-		draw_string(hud_font, cup_rect.position + Vector2(8.0, 20.0), "Pull", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_TEXT)
+		draw_string(hud_font, cup_rect.position + Vector2(8.0, 20.0), "Extraction", HORIZONTAL_ALIGNMENT_LEFT, -1, 13, COLOR_TEXT)
 		draw_string(hud_font, cup_rect.position + Vector2(8.0, 40.0), "%.1fs" % extraction_timer, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, COLOR_TEXT)
 
 	if extraction_feedback_ttl > 0.0:
@@ -2474,7 +2641,7 @@ func draw_hud() -> void:
 		draw_string(hud_font, Vector2(860.0, 80.0), "Washed ×1.5  %.0fs" % washed_buff_timer,
 				HORIZONTAL_ALIGNMENT_LEFT, -1, 13, Color("6fa8dc"))
 
-	var controls := "Arrows / WASD Move   Space Rally   E/Enter Pull Shot   Esc Pause"
+	var controls := "Arrows / WASD Move   Space Rally   E/Enter Extraction   Esc Pause"
 	var frame_bottom := board_origin.y + board_size.y + 22.0
 	var footer_y := frame_bottom + 34.0
 	var footer_rect := Rect2(0.0, footer_y - 18.0, viewport_size.x, 28.0)
@@ -2484,6 +2651,9 @@ func draw_hud() -> void:
 
 	if game_state == GameState.START_MENU:
 		draw_start_menu()
+
+	if game_state == GameState.TUTORIAL:
+		draw_tutorial_page()
 
 	if game_state == GameState.PAUSED:
 		draw_pause_menu()
@@ -2537,7 +2707,7 @@ func draw_game_over_panel() -> void:
 
 func draw_start_menu() -> void:
 	var viewport_size := get_viewport_rect().size
-	var panel_size := Vector2(460, 250)
+	var panel_size := Vector2(460, 286)
 	var panel_pos := (viewport_size - panel_size) * 0.5
 
 	draw_rect(Rect2(panel_pos, panel_size), Color(0.11, 0.08, 0.06, 0.96), true)
@@ -2546,7 +2716,7 @@ func draw_start_menu() -> void:
 	draw_string(hud_font, panel_pos + Vector2(36, 82), "Inside the machine. Stay sharp.", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_TEXT)
 
 	for i: int in range(start_menu_options.size()):
-		var y := panel_pos.y + 132.0 + float(i) * 42.0
+		var y := panel_pos.y + 132.0 + float(i) * 38.0
 		var selected: bool = (i == start_menu_index)
 		if selected:
 			draw_rect(Rect2(panel_pos.x + 30.0, y - 24.0, panel_size.x - 60.0, 30.0), Color(0.45, 0.30, 0.17, 0.45), true)
@@ -2555,7 +2725,71 @@ func draw_start_menu() -> void:
 		else:
 			draw_string(hud_font, Vector2(panel_pos.x + 52.0, y - 3.0), "  " + start_menu_options[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, COLOR_TEXT)
 
-	draw_string(hud_font, panel_pos + Vector2(36, 228), "W/S or Up/Down to navigate, Enter to select, Esc to quit", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+	draw_string(hud_font, panel_pos + Vector2(36, 264), "W/S or Up/Down to navigate, Enter to select, Esc to quit", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+func draw_tutorial_page() -> void:
+	var viewport_size := get_viewport_rect().size
+	var panel_size := Vector2(760.0, 520.0)
+	var panel_pos := (viewport_size - panel_size) * 0.5
+
+	draw_rect(Rect2(panel_pos, panel_size), Color(0.11, 0.08, 0.06, 0.97), true)
+	draw_rect(Rect2(panel_pos, panel_size), COLOR_PANEL_EDGE, false, 3.0)
+
+	draw_string(hud_font, panel_pos + Vector2(28.0, 44.0), "TUTORIAL & LEGENDS", HORIZONTAL_ALIGNMENT_LEFT, -1, 30, COLOR_BRASS)
+	draw_string(hud_font, panel_pos + Vector2(28.0, 74.0), "Controls", HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
+	draw_string(hud_font, panel_pos + Vector2(28.0, 102.0), "WASD / Arrows: Move", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+	draw_string(hud_font, panel_pos + Vector2(28.0, 126.0), "Space: Rally nearby beans", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+	draw_string(hud_font, panel_pos + Vector2(28.0, 150.0), "E / Enter: Trigger Extraction", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+	draw_string(hud_font, panel_pos + Vector2(28.0, 174.0), "Esc: Pause / Back", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	var col1_x := panel_pos.x + 28.0
+	var col2_x := panel_pos.x + 390.0
+	var top_y := panel_pos.y + 230.0
+	draw_string(hud_font, Vector2(col1_x, top_y - 20.0), "What is what", HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
+
+	var bean_pos := Vector2(col1_x, top_y)
+	draw_coffee_bean(bean_pos, COLOR_SNAKE_BODY, COLOR_SNAKE_HIGHLIGHT, Color("3a2416"))
+	draw_string(hud_font, bean_pos + Vector2(30.0, 16.0), "Your chain", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	var idle_pos := Vector2(col1_x, top_y + 38.0)
+	draw_coffee_bean(idle_pos, COLOR_FOOD, Color(0.77, 0.54, 0.33), Color(0.25, 0.16, 0.10))
+	draw_string(hud_font, idle_pos + Vector2(30.0, 16.0), "Collect beans", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	var rotten_center := Vector2(col1_x + 12.0, top_y + 90.0)
+	draw_circle(rotten_center, 10.0 * ui_scale, Color("3f4a2a"))
+	draw_line(rotten_center + Vector2(-4.0, -4.0), rotten_center + Vector2(4.0, 4.0), Color("b4d176"), 1.0)
+	draw_line(rotten_center + Vector2(-4.0, 4.0), rotten_center + Vector2(4.0, -4.0), Color("b4d176"), 1.0)
+	draw_string(hud_font, Vector2(col1_x + 30.0, top_y + 96.0), "Rotten bean (infects)", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	var broken_center := Vector2(col1_x + 12.0, top_y + 128.0)
+	draw_circle(broken_center, 10.0 * ui_scale, Color("8b5a36"))
+	draw_line(broken_center + Vector2(-3.0, -1.0), broken_center + Vector2(3.0, 5.0), Color("f0d3ac"), 1.0)
+	draw_string(hud_font, Vector2(col1_x + 30.0, top_y + 134.0), "Broken bean (-score)", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	var pebble_center := Vector2(col2_x + 12.0, top_y)
+	draw_circle(pebble_center, 10.0 * ui_scale, Color("7a7f84"))
+	draw_string(hud_font, Vector2(col2_x + 30.0, top_y + 6.0), "Pebble (blocks movement)", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	var grind_center := Vector2(col2_x + 12.0, top_y + 38.0)
+	draw_circle(grind_center, 10.0 * ui_scale, Color("989894"))
+	for i: int in range(8):
+		var ang := float(i) * TAU / 8.0
+		var p0 := grind_center + Vector2(cos(ang), sin(ang)) * 8.0
+		var p1 := grind_center + Vector2(cos(ang), sin(ang)) * 14.0
+		draw_line(p0, p1, Color("c8c8c0"), 1.0)
+	draw_string(hud_font, Vector2(col2_x + 30.0, top_y + 44.0), "Grinding teeth (scatter)", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	var gap_rect := Rect2(col2_x + 2.0, top_y + 68.0, 20.0, 20.0)
+	draw_rect(gap_rect, Color(0.06, 0.06, 0.07, 0.90), true)
+	draw_rect(gap_rect, Color(0.25, 0.25, 0.27, 0.65), false, 1.0)
+	draw_string(hud_font, Vector2(col2_x + 30.0, top_y + 84.0), "Gear gap (breaks chain)", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	var conv_rect := Rect2(col2_x + 2.0, top_y + 104.0, 20.0, 20.0)
+	draw_rect(conv_rect, Color(0.25, 0.28, 0.30, 0.75), true)
+	draw_line(Vector2(conv_rect.position.x + 4.0, conv_rect.position.y + 10.0), Vector2(conv_rect.end.x - 4.0, conv_rect.position.y + 10.0), Color(0.80, 0.82, 0.84, 0.7), 2.0)
+	draw_string(hud_font, Vector2(col2_x + 30.0, top_y + 120.0), "Conveyor (pushes beans)", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+	draw_string(hud_font, panel_pos + Vector2(28.0, panel_size.y - 22.0), "Enter/Backspace/Esc: Back to menu", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
 
 func draw_pause_menu() -> void:
 	var viewport_size := get_viewport_rect().size
