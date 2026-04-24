@@ -56,6 +56,7 @@ var start_menu_index := 0
 var pause_menu_index := 0
 var start_menu_options := ["START RUN", "QUIT"]
 var pause_menu_options := ["RESUME", "RESTART", "QUIT"]
+var wake_pulses: Array[Dictionary] = []
 
 func _ready() -> void:
 	rng.randomize()
@@ -87,7 +88,12 @@ func start_new_run() -> void:
 	direction = Vector2i.RIGHT
 	next_direction = Vector2i.RIGHT
 	spawn_food()
+	wake_pulses.clear()
 	queue_redraw()
+
+func spawn_wake_pulse(cell: Vector2i) -> void:
+	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+	wake_pulses.append({"position": center, "ttl": 0.42, "life": 0.42})
 
 func set_pause_state(paused: bool) -> void:
 	is_paused = paused
@@ -302,6 +308,7 @@ func step_game() -> void:
 		score += 10
 		best_score = max(best_score, score)
 		move_interval = max(0.07, move_interval - 0.0025)
+		spawn_wake_pulse(new_head)
 		spawn_food()
 	else:
 		snake.pop_back()
@@ -314,7 +321,12 @@ func trigger_game_over() -> void:
 	best_score = max(best_score, score)
 	queue_redraw()
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
+	for i: int in range(wake_pulses.size() - 1, -1, -1):
+		wake_pulses[i]["ttl"] = float(wake_pulses[i]["ttl"]) - delta
+		if float(wake_pulses[i]["ttl"]) <= 0.0:
+			wake_pulses.remove_at(i)
+
 	queue_redraw()
 
 func _draw() -> void:
@@ -323,6 +335,7 @@ func _draw() -> void:
 	draw_grid()
 	draw_food()
 	draw_snake()
+	draw_wake_pulses()
 	draw_hud()
 
 func draw_background() -> void:
@@ -420,11 +433,39 @@ func draw_grid() -> void:
 			draw_rect(Rect2(cell_pos, Vector2(CELL_SIZE, CELL_SIZE)), COLOR_GRID_LINE, false, 1.0)
 
 func draw_food() -> void:
-	var center := grid_to_pixel(food) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
-	draw_rect(Rect2(center - Vector2(7, 7), Vector2(14, 14)), COLOR_FOOD, true)
-	draw_rect(Rect2(center - Vector2(5, 5), Vector2(10, 10)), Color(0.20, 0.14, 0.08, 0.85), false, 2.0)
-	draw_rect(Rect2(center - Vector2(1, 9), Vector2(2, 4)), COLOR_COPPER, true)
-	draw_rect(Rect2(center - Vector2(9, 1), Vector2(18, 2)), Color("7f5a33"), true)
+	var top_left := grid_to_pixel(food)
+	draw_coffee_bean(
+		top_left,
+		COLOR_FOOD,
+		Color("f1d798"),
+		Color("6a4a2d")
+	)
+
+	# Idle bean marker: drifting zzz glyphs.
+	var ticks := float(Time.get_ticks_msec()) * 0.001
+	var center := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+	for i: int in range(3):
+		var t := ticks + float(i) * 0.37
+		var drift := Vector2(float(i) * 7.0 + sin(t * 2.2) * 2.0, -12.0 - float(i) * 6.0 - fmod(t * 10.0, 5.0))
+		var alpha := 0.35 + float(i) * 0.22
+		var z_col := Color(COLOR_STEAM.r, COLOR_STEAM.g, COLOR_STEAM.b, alpha)
+		draw_string(hud_font, center + drift, "z", HORIZONTAL_ALIGNMENT_LEFT, -1, 14 + i * 3, z_col)
+
+func draw_wake_pulses() -> void:
+	for pulse in wake_pulses:
+		var ttl := float(pulse["ttl"])
+		var life := float(pulse["life"])
+		var t := 1.0 - clampf(ttl / life, 0.0, 1.0)
+		var center: Vector2 = pulse["position"]
+		var radius := lerpf(4.0, 18.0, t)
+		var ring_col := Color(COLOR_BRASS.r, COLOR_BRASS.g, COLOR_BRASS.b, 0.7 * (1.0 - t))
+		draw_arc(center, radius, 0.0, TAU, 24, ring_col, 2.0)
+
+		for i: int in range(6):
+			var ang := float(i) * TAU / 6.0 + t * 1.1
+			var p0 := center + Vector2(cos(ang), sin(ang)) * (radius - 2.0)
+			var p1 := center + Vector2(cos(ang), sin(ang)) * (radius + 5.0)
+			draw_line(p0, p1, Color(COLOR_COPPER.r, COLOR_COPPER.g, COLOR_COPPER.b, 0.6 * (1.0 - t)), 1.0)
 
 func draw_snake() -> void:
 	for i in snake.size():
