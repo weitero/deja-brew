@@ -37,6 +37,7 @@ const GRIND_POP_LIFE := 0.20
 const GRIND_STEP_INTERVAL := 0.035
 const GRINDER_DOSE_CAP := 18
 const WASTE_FRESHNESS_PENALTY := 3.0
+const GROUND_FRESHNESS_GAIN := 2.0
 const WASTE_SPILL_LIFE := 0.45
 const FRESHNESS_MAX := 100.0
 const FRESHNESS_DRAIN_PER_SEC := 2.8
@@ -225,6 +226,7 @@ func process_grind(delta: float) -> void:
 			grind_grounded_count += 1
 			score += 2
 			best_score = max(best_score, score)
+			freshness = minf(FRESHNESS_MAX, freshness + GROUND_FRESHNESS_GAIN)
 		else:
 			grind_wasted_count += 1
 			freshness = maxf(0.0, freshness - WASTE_FRESHNESS_PENALTY)
