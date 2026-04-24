@@ -177,8 +177,10 @@ func spawn_new_leader_bean() -> void:
 	var spawn_cell := find_leader_spawn_cell()
 	snake.clear()
 	snake.append(spawn_cell)
-	direction = Vector2i.RIGHT
-	next_direction = Vector2i.RIGHT
+	var directions: Array[Vector2i] = [Vector2i.UP, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT]
+	var random_dir: Vector2i = directions[rng.randi_range(0, directions.size() - 1)]
+	direction = random_dir
+	next_direction = random_dir
 
 func spawn_grind_pop(cell: Vector2i) -> void:
 	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)

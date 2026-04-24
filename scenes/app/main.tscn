@@ -1,0 +1,7 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="PackedScene" path="res://scenes/gameplay/run_root.tscn" id="1_run_root"]
+
+[node name="Main" type="Node"]
+
+[node name="RunRoot" parent="." instance=ExtResource("1_run_root")]
