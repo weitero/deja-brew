@@ -83,9 +83,6 @@ func start_new_run() -> void:
 	snake.clear()
 	var start := Vector2i(int(GRID_SIZE.x / 2), int(GRID_SIZE.y / 2))
 	snake.append(start)
-	snake.append(start + Vector2i.LEFT)
-	snake.append(start + Vector2i.LEFT * 2)
-	snake.append(start + Vector2i.LEFT * 3)
 
 	direction = Vector2i.RIGHT
 	next_direction = Vector2i.RIGHT
@@ -222,22 +219,86 @@ func _physics_process(delta: float) -> void:
 		move_accumulator -= move_interval
 		step_game()
 
+func in_bounds(cell: Vector2i) -> bool:
+	return cell.x >= 0 and cell.y >= 0 and cell.x < GRID_SIZE.x and cell.y < GRID_SIZE.y
+
+func is_cell_blocked(cell: Vector2i, grows: bool) -> bool:
+	if not in_bounds(cell):
+		return true
+
+	# Moving into the current tail cell is allowed if the snake does not grow this step.
+	var body_limit := snake.size()
+	if not grows:
+		body_limit -= 1
+
+	for i: int in range(body_limit):
+		if snake[i] == cell:
+			return true
+
+	return false
+
+func rotate_left(dir: Vector2i) -> Vector2i:
+	if dir == Vector2i.UP:
+		return Vector2i.LEFT
+	if dir == Vector2i.LEFT:
+		return Vector2i.DOWN
+	if dir == Vector2i.DOWN:
+		return Vector2i.RIGHT
+	return Vector2i.UP
+
+func rotate_right(dir: Vector2i) -> Vector2i:
+	if dir == Vector2i.UP:
+		return Vector2i.RIGHT
+	if dir == Vector2i.RIGHT:
+		return Vector2i.DOWN
+	if dir == Vector2i.DOWN:
+		return Vector2i.LEFT
+	return Vector2i.UP
+
+func reflected_direction(current_dir: Vector2i, grows: bool) -> Vector2i:
+	var left_dir := rotate_left(current_dir)
+	var right_dir := rotate_right(current_dir)
+	var head := snake[0]
+	var left_ok := not is_cell_blocked(head + left_dir, grows)
+	var right_ok := not is_cell_blocked(head + right_dir, grows)
+
+	if left_ok and right_ok:
+		return left_dir if rng.randi_range(0, 1) == 0 else right_dir
+	if left_ok:
+		return left_dir
+	if right_ok:
+		return right_dir
+
+	# If both 90-degree turns are blocked, allow any valid move to avoid death on contact.
+	for fallback_dir in [Vector2i.UP, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT]:
+		if not is_cell_blocked(head + fallback_dir, grows):
+			return fallback_dir
+
+	# Fully trapped (extremely rare): stay in place this tick.
+	return Vector2i.ZERO
+
 func step_game() -> void:
 	direction = next_direction
+	var grows := (snake[0] + direction) == food
 	var new_head := snake[0] + direction
 
-	if new_head.x < 0 or new_head.y < 0 or new_head.x >= GRID_SIZE.x or new_head.y >= GRID_SIZE.y:
-		trigger_game_over()
-		return
+	if is_cell_blocked(new_head, grows):
+		var bounced_dir := reflected_direction(direction, grows)
+		if bounced_dir == Vector2i.ZERO:
+			queue_redraw()
+			return
+		direction = bounced_dir
+		next_direction = bounced_dir
+		grows = (snake[0] + direction) == food
+		new_head = snake[0] + direction
 
-	for segment in snake:
-		if segment == new_head:
-			trigger_game_over()
+		if is_cell_blocked(new_head, grows):
+			queue_redraw()
 			return
 
 	snake.push_front(new_head)
 
-	if new_head == food:
+	if grows:
 		score += 10
 		best_score = max(best_score, score)
 		move_interval = max(0.07, move_interval - 0.0025)
@@ -371,10 +432,9 @@ func draw_snake() -> void:
 		var top_left := grid_to_pixel(segment)
 		var body_color := COLOR_SNAKE_HEAD if i == 0 else COLOR_SNAKE_BODY
 		var highlight := COLOR_SNAKE_HIGHLIGHT if i == 0 else COLOR_COPPER
+		var seam_color := Color("3a2718") if i == 0 else Color("4b3321")
 
-		draw_rect(Rect2(top_left + Vector2(2, 2), Vector2(CELL_SIZE - 4, CELL_SIZE - 4)), body_color, true)
-		draw_rect(Rect2(top_left + Vector2(3, 3), Vector2(CELL_SIZE - 8, 5)), highlight, true)
-		draw_rect(Rect2(top_left + Vector2(2, 2), Vector2(CELL_SIZE - 4, CELL_SIZE - 4)), Color(0.16, 0.11, 0.08, 0.8), false, 1.0)
+		draw_coffee_bean(top_left, body_color, highlight, seam_color)
 
 		if i == 0:
 			var eye_color := Color("231910")
@@ -391,6 +451,28 @@ func draw_snake() -> void:
 			else:
 				draw_rect(Rect2(eye_base + Vector2(4, -5), Vector2(3, 3)), eye_color, true)
 				draw_rect(Rect2(eye_base + Vector2(4, 2), Vector2(3, 3)), eye_color, true)
+
+func draw_coffee_bean(top_left: Vector2, fill: Color, highlight: Color, seam: Color) -> void:
+	var center := top_left + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+	var radius_x := CELL_SIZE * 0.34
+	var radius_y := CELL_SIZE * 0.40
+
+	# Bean silhouette built from a core plus rounded ends.
+	draw_rect(Rect2(center + Vector2(-radius_x + 2.0, -radius_y), Vector2(radius_x * 2.0 - 4.0, radius_y * 2.0)), fill, true)
+	draw_circle(center + Vector2(-radius_x + 2.0, 0.0), radius_y, fill)
+	draw_circle(center + Vector2(radius_x - 2.0, 0.0), radius_y, fill)
+
+	# Metallic warm highlight.
+	draw_rect(Rect2(center + Vector2(-radius_x + 4.0, -radius_y + 2.0), Vector2(radius_x * 1.45, 3.0)), highlight, true)
+	draw_circle(center + Vector2(-radius_x + 3.0, -1.0), 3.0, highlight)
+
+	# Center groove for coffee-bean identity.
+	for j: int in range(5):
+		var offset := -4.0 + float(j) * 2.0
+		draw_line(center + Vector2(offset * 0.35, -6.0 + float(j) * 3.0), center + Vector2(offset * 0.65, -2.5 + float(j) * 3.0), seam, 1.0)
+
+	# Pixel-ish border.
+	draw_rect(Rect2(center + Vector2(-radius_x + 1.0, -radius_y), Vector2(radius_x * 2.0 - 2.0, radius_y * 2.0)), Color(0.16, 0.11, 0.08, 0.85), false, 1.0)
 
 func draw_hud() -> void:
 	var viewport_size := get_viewport_rect().size
