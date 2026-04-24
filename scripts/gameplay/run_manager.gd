@@ -74,6 +74,7 @@ const ARM_INTERVAL := 11.0
 const ARM_TELEGRAPH_SEC := 1.0
 const ARM_ACTIVE_SEC := 0.8
 const ARM_PUSH_CELLS := 2
+const LEVEL_ORDER := ["level_1_hopper", "level_2_sort", "level_3_roast"]
 
 ## Water puddles (L2+)
 const WASHED_BUFF_DURATION        := 10.0   ## seconds the Washed ×1.5 buff lasts
@@ -1071,6 +1072,33 @@ func activate_pause_option() -> void:
 		2:
 			get_tree().quit()
 
+func _get_level_index(lid: String) -> int:
+	for i: int in range(LEVEL_ORDER.size()):
+		if LEVEL_ORDER[i] == lid:
+			return i
+	return -1
+
+func _has_next_level() -> bool:
+	var idx := _get_level_index(level_id)
+	if idx < 0:
+		return false
+	return idx < LEVEL_ORDER.size() - 1
+
+func _next_level_id() -> String:
+	var idx := _get_level_index(level_id)
+	if idx < 0 or idx >= LEVEL_ORDER.size() - 1:
+		return ""
+	return str(LEVEL_ORDER[idx + 1])
+
+func _advance_to_next_level() -> bool:
+	var next_id := _next_level_id()
+	if next_id.is_empty():
+		return false
+	level_id = next_id
+	wave_mgr.init(level_id)
+	_apply_level_config()
+	return true
+
 func is_idle_bean_at(cell: Vector2i) -> bool:
 	for bean in idle_beans:
 		if bean == cell:
@@ -1228,6 +1256,7 @@ func _unhandled_input(event: InputEvent) -> void:
 
 		if game_state == GameState.LEVEL_COMPLETE:
 			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
+				_advance_to_next_level()
 				start_new_run()
 				game_state = GameState.PLAYING
 				return
@@ -1775,6 +1804,9 @@ func draw_level_complete_panel() -> void:
 	var viewport_size := get_viewport_rect().size
 	var panel_size    := Vector2(480.0, 240.0)
 	var panel_pos     := (viewport_size - panel_size) * 0.5
+	var next_label    := "Enter: Play Again"
+	if _has_next_level():
+		next_label = "Enter: Next Level"
 
 	draw_rect(Rect2(panel_pos, panel_size), Color(0.08, 0.06, 0.04, 0.96), true)
 	draw_rect(Rect2(panel_pos, panel_size), COLOR_PANEL_EDGE, false, 3.0)
@@ -1789,7 +1821,7 @@ func draw_level_complete_panel() -> void:
 			"Best Score:  %d" % saved_high_score,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 22, COLOR_TEXT)
 	draw_string(hud_font, panel_pos + Vector2(34.0, 168.0),
-			"Enter: Play Again",
+			next_label,
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_BRASS)
 	draw_string(hud_font, panel_pos + Vector2(34.0, 196.0),
 			"Esc:   Return to Menu",
