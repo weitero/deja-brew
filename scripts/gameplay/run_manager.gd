@@ -41,6 +41,12 @@ const GROUND_FRESHNESS_GAIN := 2.0
 const WASTE_SPILL_LIFE := 0.45
 const FRESHNESS_MAX := 100.0
 const FRESHNESS_DRAIN_PER_SEC := 2.8
+const RALLY_RADIUS_CELLS := 3.0
+const RALLY_COOLDOWN_SEC := 3.0
+const RESUME_COUNTDOWN_SEC := 3.0
+const EXTRACTION_AUTO_PULL_SEC := 36.0
+const EXTRACTION_FRESHNESS_MISS_PENALTY := 5.0
+const BURR_ROTATION_INTERVAL := 8.0
 
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
@@ -53,6 +59,7 @@ var rng := RandomNumberGenerator.new()
 
 var score := 0
 var best_score := 0
+var saved_high_score := 0
 var move_interval := 0.13
 var move_accumulator := 0.0
 var freshness := FRESHNESS_MAX
@@ -88,9 +95,19 @@ var grind_pops: Array[Dictionary] = []
 var grind_grounded_count := 0
 var grind_wasted_count := 0
 var waste_spills: Array[Dictionary] = []
+var rally_cooldown_left := 0.0
+var resume_countdown_left := 0.0
+var extraction_active := false
+var extraction_timer := 0.0
+var extraction_base_score := 0
+var extraction_feedback := ""
+var extraction_feedback_ttl := 0.0
+var burr_timer := BURR_ROTATION_INTERVAL
+var burr_phase_index := 0
 
 func _ready() -> void:
 	rng.randomize()
+	load_high_score()
 	hud_font = ThemeDB.fallback_font
 	var viewport_size := get_viewport_rect().size
 	board_size = Vector2(GRID_SIZE.x * CELL_SIZE, GRID_SIZE.y * CELL_SIZE)
@@ -117,7 +134,32 @@ func _ready() -> void:
 	grind_grounded_count = 0
 	grind_wasted_count = 0
 	waste_spills.clear()
+	rally_cooldown_left = 0.0
+	resume_countdown_left = 0.0
+	extraction_active = false
+	extraction_timer = 0.0
+	extraction_base_score = 0
+	extraction_feedback = ""
+	extraction_feedback_ttl = 0.0
+	burr_timer = BURR_ROTATION_INTERVAL
+	burr_phase_index = 0
 	game_state = GameState.START_MENU
+	best_score = max(best_score, saved_high_score)
+
+func load_high_score() -> void:
+	var save_file := ConfigFile.new()
+	if save_file.load("user://kamikaze_save.cfg") != OK:
+		saved_high_score = 0
+		return
+	saved_high_score = int(save_file.get_value("scores", "high_score", 0))
+
+func save_high_score_if_needed() -> void:
+	if score <= saved_high_score:
+		return
+	saved_high_score = score
+	var save_file := ConfigFile.new()
+	save_file.set_value("scores", "high_score", saved_high_score)
+	save_file.save("user://kamikaze_save.cfg")
 
 func start_new_run() -> void:
 	score = 0
@@ -149,8 +191,112 @@ func start_new_run() -> void:
 	grind_grounded_count = 0
 	grind_wasted_count = 0
 	waste_spills.clear()
+	rally_cooldown_left = 0.0
+	resume_countdown_left = 0.0
+	extraction_active = false
+	extraction_timer = 0.0
+	extraction_base_score = 0
+	extraction_feedback = ""
+	extraction_feedback_ttl = 0.0
+	burr_timer = BURR_ROTATION_INTERVAL
+	burr_phase_index = 0
 	wake_pulses.clear()
 	queue_redraw()
+
+func extraction_multiplier(seconds: float) -> float:
+	if seconds <= 15.0:
+		return 0.5
+	if seconds <= 20.0:
+		return 0.8
+	if seconds <= 29.0:
+		return 1.0
+	if seconds <= 35.0:
+		return 0.8
+	return 0.5
+
+func extraction_label(seconds: float) -> String:
+	if seconds <= 15.0:
+		return "Sour pull"
+	if seconds <= 20.0:
+		return "Early pull"
+	if seconds <= 29.0:
+		return "Perfetto"
+	if seconds <= 35.0:
+		return "Late pull"
+	return "Bitter auto-pull"
+
+func finalize_extraction(auto_pull: bool) -> void:
+	if not extraction_active:
+		return
+	var mult := extraction_multiplier(extraction_timer)
+	var final_score := int(round(float(extraction_base_score) * mult))
+	var delta := final_score - extraction_base_score
+	score += delta
+	best_score = max(best_score, score)
+	extraction_feedback = extraction_label(extraction_timer)
+	extraction_feedback_ttl = 1.8
+	if auto_pull:
+		freshness = maxf(0.0, freshness - EXTRACTION_FRESHNESS_MISS_PENALTY)
+	extraction_active = false
+	extraction_timer = 0.0
+	extraction_base_score = 0
+
+func begin_extraction_from_grind(grounded_count: int) -> void:
+	if grounded_count <= 0:
+		return
+	if extraction_active:
+		finalize_extraction(false)
+	extraction_active = true
+	extraction_timer = 0.0
+	extraction_base_score = grounded_count * 2
+
+func trigger_rally_call() -> void:
+	if game_state != GameState.PLAYING or rally_cooldown_left > 0.0 or snake.is_empty():
+		return
+	rally_cooldown_left = RALLY_COOLDOWN_SEC
+	var head := snake[0]
+	var recruited: Array[Vector2i] = []
+	for i: int in range(idle_beans.size() - 1, -1, -1):
+		var bean := idle_beans[i]
+		if head.distance_to(bean) <= RALLY_RADIUS_CELLS:
+			idle_beans.remove_at(i)
+			bean_spawn_age.erase(bean_key(bean))
+			recruited.append(bean)
+			spawn_wake_pulse(bean)
+	for bean in recruited:
+		snake.append(bean)
+
+func trigger_burr_rotation() -> void:
+	var phases: Array[Vector2i] = [Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT, Vector2i.UP]
+	var push_dir: Vector2i = phases[burr_phase_index]
+	burr_phase_index = (burr_phase_index + 1) % phases.size()
+
+	var pushed_snake: Array[Vector2i] = []
+	for seg in snake:
+		var new_seg := seg
+		for _i: int in range(2):
+			var next := new_seg + push_dir
+			if not in_bounds(next):
+				break
+			new_seg = next
+		pushed_snake.append(new_seg)
+	snake = pushed_snake
+
+	var occupied := {}
+	for seg in snake:
+		occupied[seg] = true
+
+	for i: int in range(idle_beans.size()):
+		var bean := idle_beans[i]
+		var moved := bean
+		for _j: int in range(2):
+			var next := moved + push_dir
+			if not in_bounds(next):
+				break
+			moved = next
+		if not occupied.has(moved):
+			idle_beans[i] = moved
+			occupied[moved] = true
 
 func can_spawn_leader(cell: Vector2i) -> bool:
 	return in_bounds(cell) and not is_grinder_cell(cell) and not is_idle_bean_at(cell)
@@ -219,6 +365,7 @@ func process_grind(delta: float) -> void:
 		grind_step_timer -= GRIND_STEP_INTERVAL
 		if snake.is_empty():
 			is_grinding = false
+			begin_extraction_from_grind(grind_grounded_count)
 			spawn_new_leader_bean()
 			return
 
@@ -239,6 +386,7 @@ func process_grind(delta: float) -> void:
 
 		if snake.is_empty():
 			is_grinding = false
+			begin_extraction_from_grind(grind_grounded_count)
 			grind_grounded_count = 0
 			grind_wasted_count = 0
 			spawn_new_leader_bean()
@@ -254,6 +402,10 @@ func spawn_wake_pulse(cell: Vector2i) -> void:
 func set_pause_state(paused: bool) -> void:
 	is_paused = paused
 	game_state = GameState.PAUSED if paused else GameState.PLAYING
+	if paused:
+		resume_countdown_left = 0.0
+	else:
+		resume_countdown_left = RESUME_COUNTDOWN_SEC
 	queue_redraw()
 
 func activate_start_option() -> void:
@@ -417,7 +569,11 @@ func _unhandled_input(event: InputEvent) -> void:
 				return
 
 		if key_event.keycode == KEY_SPACE and game_state == GameState.PLAYING:
-			set_pause_state(true)
+			trigger_rally_call()
+			return
+
+		if game_state == GameState.PLAYING and (key_event.keycode == KEY_E or key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER):
+			finalize_extraction(false)
 			return
 
 		if game_state != GameState.PLAYING:
@@ -455,11 +611,42 @@ func _physics_process(delta: float) -> void:
 	if game_state != GameState.PLAYING:
 		return
 
+	if resume_countdown_left > 0.0:
+		resume_countdown_left = maxf(0.0, resume_countdown_left - delta)
+		queue_redraw()
+		return
+
 	time_alive += delta
 	freshness = maxf(0.0, freshness - FRESHNESS_DRAIN_PER_SEC * delta)
 	if freshness <= 0.0:
 		trigger_game_over()
 		return
+
+	rally_cooldown_left = maxf(0.0, rally_cooldown_left - delta)
+	if extraction_active:
+		extraction_timer += delta
+		if extraction_timer >= EXTRACTION_AUTO_PULL_SEC:
+			finalize_extraction(true)
+
+	burr_timer -= delta
+	if burr_timer <= 0.0:
+		burr_timer += BURR_ROTATION_INTERVAL
+		trigger_burr_rotation()
+
+	var steer_axis := Input.get_vector("ui_left", "ui_right", "ui_up", "ui_down")
+	if steer_axis.length() > 0.0:
+		var dx := 0
+		var dy := 0
+		if steer_axis.x > 0.2:
+			dx = 1
+		elif steer_axis.x < -0.2:
+			dx = -1
+		if steer_axis.y > 0.2:
+			dy = 1
+		elif steer_axis.y < -0.2:
+			dy = -1
+		if dx != 0 or dy != 0:
+			try_set_direction(Vector2i(dx, dy))
 
 	if not grinder_active:
 		grinder_telegraph_timer = maxf(0.0, grinder_telegraph_timer - delta)
@@ -497,44 +684,34 @@ func is_cell_blocked(cell: Vector2i, _grows: bool) -> bool:
 		return true
 	return false
 
-func rotate_left(dir: Vector2i) -> Vector2i:
-	if dir == Vector2i.UP:
-		return Vector2i.LEFT
-	if dir == Vector2i.LEFT:
-		return Vector2i.DOWN
-	if dir == Vector2i.DOWN:
-		return Vector2i.RIGHT
-	return Vector2i.UP
-
-func rotate_right(dir: Vector2i) -> Vector2i:
-	if dir == Vector2i.UP:
-		return Vector2i.RIGHT
-	if dir == Vector2i.RIGHT:
-		return Vector2i.DOWN
-	if dir == Vector2i.DOWN:
-		return Vector2i.LEFT
-	return Vector2i.UP
-
 func reflected_direction(current_dir: Vector2i, grows: bool) -> Vector2i:
-	var left_dir := rotate_left(current_dir)
-	var right_dir := rotate_right(current_dir)
 	var head := snake[0]
-	var left_ok := not is_cell_blocked(head + left_dir, grows)
-	var right_ok := not is_cell_blocked(head + right_dir, grows)
+	var bounced := current_dir
+	var attempted := head + current_dir
 
-	if left_ok and right_ok:
-		return left_dir if rng.randi_range(0, 1) == 0 else right_dir
-	if left_ok:
-		return left_dir
-	if right_ok:
-		return right_dir
+	if attempted.x < 0 or attempted.x >= GRID_SIZE.x:
+		bounced.x = -bounced.x
+	if attempted.y < 0 or attempted.y >= GRID_SIZE.y:
+		bounced.y = -bounced.y
 
-	# If both 90-degree turns are blocked, allow any valid move to avoid death on contact.
-	for fallback_dir in [Vector2i.UP, Vector2i.RIGHT, Vector2i.DOWN, Vector2i.LEFT]:
+	if bounced != Vector2i.ZERO and not is_cell_blocked(head + bounced, grows):
+		return bounced
+
+	var fallback_dirs: Array[Vector2i] = [
+		Vector2i.RIGHT,
+		Vector2i.DOWN,
+		Vector2i.LEFT,
+		Vector2i.UP,
+		Vector2i(1, 1),
+		Vector2i(-1, 1),
+		Vector2i(-1, -1),
+		Vector2i(1, -1)
+	]
+	fallback_dirs.shuffle()
+	for fallback_dir in fallback_dirs:
 		if not is_cell_blocked(head + fallback_dir, grows):
 			return fallback_dir
 
-	# Fully trapped (extremely rare): stay in place this tick.
 	return Vector2i.ZERO
 
 func step_game() -> void:
@@ -586,14 +763,21 @@ func trigger_game_over() -> void:
 	game_over = true
 	game_state = GameState.GAME_OVER
 	is_grinding = false
+	extraction_active = false
+	extraction_timer = 0.0
+	extraction_base_score = 0
 	grind_grounded_count = 0
 	grind_wasted_count = 0
 	best_score = max(best_score, score)
+	save_high_score_if_needed()
 	queue_redraw()
 
 func _process(delta: float) -> void:
 	if game_state == GameState.PLAYING:
 		grinder_angle += delta * 3.0
+
+	if extraction_feedback_ttl > 0.0:
+		extraction_feedback_ttl = maxf(0.0, extraction_feedback_ttl - delta)
 
 	for key: String in bean_spawn_age.keys():
 		var age: float = float(bean_spawn_age[key]) + delta
@@ -983,7 +1167,36 @@ func draw_hud() -> void:
 	var dose_count: int = grind_grounded_count if is_grinding else mini(snake.size(), GRINDER_DOSE_CAP)
 	draw_portafilter_hud(Vector2(520.0, 44.0), dose_count, GRINDER_DOSE_CAP)
 
-	var controls := "Arrows / WASD Move   Esc Pause Menu   Enter Select"
+	var rally_ratio := clampf(rally_cooldown_left / RALLY_COOLDOWN_SEC, 0.0, 1.0)
+	var rally_state := "READY" if rally_cooldown_left <= 0.0 else "%.1fs" % rally_cooldown_left
+	draw_string(hud_font, Vector2(760, 64), "Rally: %s" % rally_state, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_TEXT)
+
+	if extraction_active:
+		var cup_rect := Rect2(860.0, 12.0, 78.0, 58.0)
+		var cup_fill_ratio := clampf(extraction_timer / EXTRACTION_AUTO_PULL_SEC, 0.0, 1.0)
+		var cup_col := Color("d2bf9f")
+		if extraction_timer <= 15.0:
+			cup_col = Color("d6c7ad")
+		elif extraction_timer <= 20.0:
+			cup_col = Color("d4a46a")
+		elif extraction_timer <= 29.0:
+			cup_col = Color("ffd16b")
+		elif extraction_timer <= 35.0:
+			cup_col = Color("9a6a43")
+		else:
+			cup_col = Color("3b2a1c")
+
+		draw_rect(cup_rect, Color("2a1f17"), true)
+		draw_rect(cup_rect, COLOR_PANEL_EDGE, false, 2.0)
+		var fill_h := (cup_rect.size.y - 10.0) * cup_fill_ratio
+		draw_rect(Rect2(cup_rect.position.x + 5.0, cup_rect.end.y - 5.0 - fill_h, cup_rect.size.x - 10.0, fill_h), cup_col, true)
+		draw_string(hud_font, cup_rect.position + Vector2(8.0, 20.0), "Pull", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_TEXT)
+		draw_string(hud_font, cup_rect.position + Vector2(8.0, 40.0), "%.1fs" % extraction_timer, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, COLOR_TEXT)
+
+	if extraction_feedback_ttl > 0.0:
+		draw_string(hud_font, Vector2(860.0, 78.0), extraction_feedback, HORIZONTAL_ALIGNMENT_LEFT, -1, 14, COLOR_BRASS)
+
+	var controls := "Arrows / WASD Move   Space Rally   E/Enter Pull Shot   Esc Pause"
 	var footer_y := board_origin.y + board_size.y + 26.0
 	var footer_rect := Rect2(0.0, footer_y - 18.0, viewport_size.x, 28.0)
 	draw_rect(footer_rect, Color(0.12, 0.09, 0.07, 0.75), true)
@@ -997,7 +1210,14 @@ func draw_hud() -> void:
 		draw_pause_menu()
 
 	if game_state == GameState.GAME_OVER:
-		draw_centered_panel("PRESSURE LOST", "Press Enter to restart")
+		draw_centered_panel(
+			"PRESSURE LOST",
+			"Score %d  Best %d  (Enter restart / Esc menu)" % [score, saved_high_score]
+		)
+
+	if game_state == GameState.PLAYING and resume_countdown_left > 0.0:
+		var countdown := int(ceil(resume_countdown_left))
+		draw_centered_panel("RESUMING", "%d" % countdown)
 
 func draw_portafilter_hud(pos: Vector2, dose_count: int, dose_cap: int) -> void:
 	var body := Rect2(pos.x + 24.0, pos.y + 8.0, 124.0, 18.0)
@@ -1065,7 +1285,7 @@ func draw_pause_menu() -> void:
 		else:
 			draw_string(hud_font, Vector2(panel_pos.x + 52.0, y - 2.0), "  " + pause_menu_options[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 23, COLOR_TEXT)
 
-	draw_string(hud_font, panel_pos + Vector2(38, 226), "Esc resumes instantly", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+	draw_string(hud_font, panel_pos + Vector2(38, 226), "Resume starts a 3-2-1 countdown", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
 
 func draw_centered_panel(title: String, subtitle: String) -> void:
 	var viewport_size := get_viewport_rect().size
