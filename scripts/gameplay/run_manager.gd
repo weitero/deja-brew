@@ -305,7 +305,7 @@ func _exit_tree() -> void:
 
 func load_high_score() -> void:
 	var save_file := ConfigFile.new()
-	if save_file.load("user://kamikaze_save.cfg") != OK:
+	if save_file.load("user://deja_brew_save.cfg") != OK:
 		saved_high_score = 0
 		return
 	saved_high_score = int(save_file.get_value("scores", "high_score", 0))
@@ -316,7 +316,7 @@ func save_high_score_if_needed() -> void:
 	saved_high_score = score
 	var save_file := ConfigFile.new()
 	save_file.set_value("scores", "high_score", saved_high_score)
-	save_file.save("user://kamikaze_save.cfg")
+	save_file.save("user://deja_brew_save.cfg")
 
 func start_new_run() -> void:
 	score = 0
@@ -2712,7 +2712,7 @@ func draw_start_menu() -> void:
 
 	draw_rect(Rect2(panel_pos, panel_size), Color(0.11, 0.08, 0.06, 0.96), true)
 	draw_rect(Rect2(panel_pos, panel_size), COLOR_PANEL_EDGE, false, 3.0)
-	draw_string(hud_font, panel_pos + Vector2(36, 52), "KAMIKAZE SNAKE", HORIZONTAL_ALIGNMENT_LEFT, -1, 36, COLOR_BRASS)
+	draw_string(hud_font, panel_pos + Vector2(36, 52), "Déjà Brew", HORIZONTAL_ALIGNMENT_LEFT, -1, 36, COLOR_BRASS)
 	draw_string(hud_font, panel_pos + Vector2(36, 82), "Inside the machine. Stay sharp.", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_TEXT)
 
 	for i: int in range(start_menu_options.size()):
