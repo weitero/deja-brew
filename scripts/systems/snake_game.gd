@@ -35,6 +35,9 @@ const GRINDER_TELEGRAPH_TIME := 2.0
 const GRINDER_RELOCATE_INTERVAL := 5.0
 const GRIND_POP_LIFE := 0.20
 const GRIND_STEP_INTERVAL := 0.035
+const GRINDER_DOSE_CAP := 18
+const FRESHNESS_MAX := 100.0
+const FRESHNESS_DRAIN_PER_SEC := 2.8
 
 var board_origin := Vector2.ZERO
 var board_size := Vector2.ZERO
@@ -49,6 +52,7 @@ var score := 0
 var best_score := 0
 var move_interval := 0.13
 var move_accumulator := 0.0
+var freshness := FRESHNESS_MAX
 var is_paused := false
 var game_over := false
 var time_alive := 0.0
@@ -78,6 +82,7 @@ var grinder_relocate_timer := 0.0
 var is_grinding := false
 var grind_step_timer := 0.0
 var grind_pops: Array[Dictionary] = []
+var grind_grounded_count := 0
 
 func _ready() -> void:
 	rng.randomize()
@@ -104,12 +109,14 @@ func _ready() -> void:
 	is_grinding = false
 	grind_step_timer = 0.0
 	grind_pops.clear()
+	grind_grounded_count = 0
 	game_state = GameState.START_MENU
 
 func start_new_run() -> void:
 	score = 0
 	move_interval = 0.13
 	move_accumulator = 0.0
+	freshness = FRESHNESS_MAX
 	time_alive = 0.0
 	game_over = false
 	is_paused = false
@@ -132,6 +139,7 @@ func start_new_run() -> void:
 	is_grinding = false
 	grind_step_timer = 0.0
 	grind_pops.clear()
+	grind_grounded_count = 0
 	wake_pulses.clear()
 	queue_redraw()
 
@@ -172,6 +180,7 @@ func begin_grind_sequence() -> void:
 		return
 	is_grinding = true
 	grind_step_timer = 0.0
+	grind_grounded_count = 0
 
 func process_grind(delta: float) -> void:
 	if not is_grinding:
@@ -187,9 +196,14 @@ func process_grind(delta: float) -> void:
 
 		var consumed: Vector2i = snake.pop_front()
 		spawn_grind_pop(consumed)
+		if grind_grounded_count < GRINDER_DOSE_CAP:
+			grind_grounded_count += 1
+			score += 2
+			best_score = max(best_score, score)
 
 		if snake.is_empty():
 			is_grinding = false
+			grind_grounded_count = 0
 			spawn_new_leader_bean()
 			return
 
@@ -405,6 +419,11 @@ func _physics_process(delta: float) -> void:
 		return
 
 	time_alive += delta
+	freshness = maxf(0.0, freshness - FRESHNESS_DRAIN_PER_SEC * delta)
+	if freshness <= 0.0:
+		trigger_game_over()
+		return
+
 	if not grinder_active:
 		grinder_telegraph_timer = maxf(0.0, grinder_telegraph_timer - delta)
 		if grinder_telegraph_timer <= 0.0:
@@ -506,13 +525,18 @@ func step_game() -> void:
 	snake.push_front(new_head)
 
 	if grinder_active and is_grinder_cell(new_head):
+		# Preserve normal movement length before grind starts.
+		# Without this, a non-growth move into the grinder keeps an extra tail segment.
+		if not grows and snake.size() > 1:
+			snake.pop_back()
+		elif grows:
+			remove_idle_bean_at(new_head)
+			spawn_wake_pulse(new_head)
 		begin_grind_sequence()
 		queue_redraw()
 		return
 
 	if grows:
-		score += 10
-		best_score = max(best_score, score)
 		move_interval = max(0.07, move_interval - 0.0025)
 		remove_idle_bean_at(new_head)
 		spawn_wake_pulse(new_head)
@@ -524,6 +548,8 @@ func step_game() -> void:
 func trigger_game_over() -> void:
 	game_over = true
 	game_state = GameState.GAME_OVER
+	is_grinding = false
+	grind_grounded_count = 0
 	best_score = max(best_score, score)
 	queue_redraw()
 
@@ -878,10 +904,16 @@ func draw_hud() -> void:
 	var speed_text := "Speed: %.1fx" % (0.13 / move_interval)
 	draw_string(hud_font, Vector2(330, 64), speed_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
 
-	if game_state == GameState.PLAYING or game_state == GameState.PAUSED:
-		var next_drop_in: float = maxf(0.0, bean_trickle_interval - bean_spawn_timer)
-		var drop_text := "Next Hopper Drop: %.1fs" % next_drop_in
-		draw_string(hud_font, Vector2(520, 34), drop_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_BRASS)
+	var fresh_panel := Rect2(520.0, 16.0, 320.0, 24.0)
+	var freshness_ratio: float = clampf(freshness / FRESHNESS_MAX, 0.0, 1.0)
+	var fill_color := Color("6f9f52") if freshness_ratio > 0.5 else (Color("c68b42") if freshness_ratio > 0.25 else COLOR_DANGER)
+	draw_rect(fresh_panel, Color("1a140f"), true)
+	draw_rect(fresh_panel, COLOR_PANEL_EDGE, false, 2.0)
+	draw_rect(Rect2(fresh_panel.position + Vector2(2, 2), Vector2((fresh_panel.size.x - 4.0) * freshness_ratio, fresh_panel.size.y - 4.0)), fill_color, true)
+	draw_string(hud_font, Vector2(522, 34), "Freshness: %d%%" % int(round(freshness)), HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_TEXT)
+
+	var dose_count: int = grind_grounded_count if is_grinding else mini(snake.size(), GRINDER_DOSE_CAP)
+	draw_portafilter_hud(Vector2(520.0, 44.0), dose_count, GRINDER_DOSE_CAP)
 
 	var controls := "Arrows / WASD Move   Esc Pause Menu   Enter Select"
 	draw_string(hud_font, Vector2(520, 64), controls, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
@@ -894,6 +926,30 @@ func draw_hud() -> void:
 
 	if game_state == GameState.GAME_OVER:
 		draw_centered_panel("PRESSURE LOST", "Press Enter to restart")
+
+func draw_portafilter_hud(pos: Vector2, dose_count: int, dose_cap: int) -> void:
+	var body := Rect2(pos.x + 24.0, pos.y + 8.0, 124.0, 18.0)
+	var handle := Rect2(pos.x + 148.0, pos.y + 12.0, 26.0, 10.0)
+	var ratio: float = clampf(float(dose_count) / float(dose_cap), 0.0, 1.0)
+
+	# Portafilter body and handle.
+	draw_rect(body, Color("3c2f24"), true)
+	draw_rect(body, Color("8d6a48"), false, 2.0)
+	draw_rect(handle, Color("6c4f35"), true)
+	draw_rect(handle, Color("3a291a"), false, 1.0)
+
+	# Dose fill inside basket.
+	var inner := Rect2(body.position + Vector2(2.0, 2.0), body.size - Vector2(4.0, 4.0))
+	draw_rect(inner, Color("1d140f"), true)
+	draw_rect(Rect2(inner.position, Vector2(inner.size.x * ratio, inner.size.y)), Color("8c5c36"), true)
+
+	# Tick separators for 18g capacity.
+	for i: int in range(1, 6):
+		var tx := inner.position.x + inner.size.x * float(i) / 6.0
+		draw_line(Vector2(tx, inner.position.y), Vector2(tx, inner.end.y), Color(0.12, 0.09, 0.07, 0.35), 1.0)
+
+	draw_string(hud_font, Vector2(pos.x, pos.y + 22.0), "Dose", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_BRASS)
+	draw_string(hud_font, Vector2(pos.x + 184.0, pos.y + 22.0), "%d/%d" % [dose_count, dose_cap], HORIZONTAL_ALIGNMENT_LEFT, -1, 16, COLOR_TEXT)
 
 func draw_start_menu() -> void:
 	var viewport_size := get_viewport_rect().size
