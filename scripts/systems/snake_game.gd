@@ -36,6 +36,8 @@ const GRINDER_RELOCATE_INTERVAL := 5.0
 const GRIND_POP_LIFE := 0.20
 const GRIND_STEP_INTERVAL := 0.035
 const GRINDER_DOSE_CAP := 18
+const WASTE_FRESHNESS_PENALTY := 3.0
+const WASTE_SPILL_LIFE := 0.45
 const FRESHNESS_MAX := 100.0
 const FRESHNESS_DRAIN_PER_SEC := 2.8
 
@@ -83,6 +85,8 @@ var is_grinding := false
 var grind_step_timer := 0.0
 var grind_pops: Array[Dictionary] = []
 var grind_grounded_count := 0
+var grind_wasted_count := 0
+var waste_spills: Array[Dictionary] = []
 
 func _ready() -> void:
 	rng.randomize()
@@ -110,6 +114,8 @@ func _ready() -> void:
 	grind_step_timer = 0.0
 	grind_pops.clear()
 	grind_grounded_count = 0
+	grind_wasted_count = 0
+	waste_spills.clear()
 	game_state = GameState.START_MENU
 
 func start_new_run() -> void:
@@ -140,6 +146,8 @@ func start_new_run() -> void:
 	grind_step_timer = 0.0
 	grind_pops.clear()
 	grind_grounded_count = 0
+	grind_wasted_count = 0
+	waste_spills.clear()
 	wake_pulses.clear()
 	queue_redraw()
 
@@ -175,12 +183,29 @@ func spawn_grind_pop(cell: Vector2i) -> void:
 	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
 	grind_pops.append({"position": center, "ttl": GRIND_POP_LIFE, "life": GRIND_POP_LIFE})
 
+func spawn_waste_spill(cell: Vector2i) -> void:
+	var center := grid_to_pixel(cell) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+	var grinder_center := grid_to_pixel(grinder_origin) + Vector2(CELL_SIZE, CELL_SIZE)
+	var outward := (center - grinder_center).normalized()
+	if outward.length() < 0.01:
+		outward = Vector2(1.0 if rng.randi_range(0, 1) == 0 else -1.0, 0.0)
+
+	var vx := outward.x * rng.randf_range(90.0, 140.0)
+	var vy := -rng.randf_range(35.0, 70.0)
+	waste_spills.append({
+		"position": center,
+		"velocity": Vector2(vx, vy),
+		"ttl": WASTE_SPILL_LIFE,
+		"life": WASTE_SPILL_LIFE
+	})
+
 func begin_grind_sequence() -> void:
 	if is_grinding or snake.is_empty():
 		return
 	is_grinding = true
 	grind_step_timer = 0.0
 	grind_grounded_count = 0
+	grind_wasted_count = 0
 
 func process_grind(delta: float) -> void:
 	if not is_grinding:
@@ -195,15 +220,23 @@ func process_grind(delta: float) -> void:
 			return
 
 		var consumed: Vector2i = snake.pop_front()
-		spawn_grind_pop(consumed)
 		if grind_grounded_count < GRINDER_DOSE_CAP:
+			spawn_grind_pop(consumed)
 			grind_grounded_count += 1
 			score += 2
 			best_score = max(best_score, score)
+		else:
+			grind_wasted_count += 1
+			freshness = maxf(0.0, freshness - WASTE_FRESHNESS_PENALTY)
+			spawn_waste_spill(consumed)
+			if freshness <= 0.0:
+				trigger_game_over()
+				return
 
 		if snake.is_empty():
 			is_grinding = false
 			grind_grounded_count = 0
+			grind_wasted_count = 0
 			spawn_new_leader_bean()
 			return
 
@@ -550,6 +583,7 @@ func trigger_game_over() -> void:
 	game_state = GameState.GAME_OVER
 	is_grinding = false
 	grind_grounded_count = 0
+	grind_wasted_count = 0
 	best_score = max(best_score, score)
 	queue_redraw()
 
@@ -571,6 +605,18 @@ func _process(delta: float) -> void:
 		if float(grind_pops[i]["ttl"]) <= 0.0:
 			grind_pops.remove_at(i)
 
+	for i: int in range(waste_spills.size() - 1, -1, -1):
+		var ttl: float = float(waste_spills[i]["ttl"]) - delta
+		waste_spills[i]["ttl"] = ttl
+		if ttl <= 0.0:
+			waste_spills.remove_at(i)
+			continue
+
+		var vel: Vector2 = waste_spills[i]["velocity"]
+		vel.y += 260.0 * delta
+		waste_spills[i]["velocity"] = vel
+		waste_spills[i]["position"] = Vector2(waste_spills[i]["position"]) + vel * delta
+
 	queue_redraw()
 
 func _draw() -> void:
@@ -581,6 +627,7 @@ func _draw() -> void:
 	draw_idle_beans()
 	draw_snake()
 	draw_grind_pops()
+	draw_waste_spills()
 	draw_wake_pulses()
 	draw_hud()
 
@@ -813,6 +860,19 @@ func draw_grind_pops() -> void:
 			var p1 := center + Vector2(cos(ang), sin(ang)) * (ring_r + 3.0)
 			draw_line(p0, p1, Color(0.95, 0.80, 0.55, alpha), 1.0)
 
+func draw_waste_spills() -> void:
+	for spill in waste_spills:
+		var ttl := float(spill["ttl"])
+		var life := float(spill["life"])
+		var t := 1.0 - clampf(ttl / life, 0.0, 1.0)
+		var pos: Vector2 = spill["position"]
+		var alpha := 0.95 * (1.0 - t)
+
+		draw_rect(Rect2(pos - Vector2(4.0, 3.0), Vector2(8.0, 6.0)), Color(0.62, 0.40, 0.24, alpha), true)
+		draw_rect(Rect2(pos - Vector2(3.0, 2.0), Vector2(6.0, 4.0)), Color(0.77, 0.54, 0.33, alpha * 0.75), false, 1.0)
+		if t < 0.45:
+			draw_string(hud_font, pos + Vector2(7.0, -6.0), "clink", HORIZONTAL_ALIGNMENT_LEFT, -1, 11, Color(0.89, 0.78, 0.62, alpha * 0.9))
+
 func draw_snake() -> void:
 	for i in snake.size():
 		var segment := snake[i]
@@ -900,6 +960,10 @@ func draw_hud() -> void:
 
 	var score_text := "Score: %d   Best: %d" % [score, best_score]
 	draw_string(hud_font, Vector2(28, 64), score_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
+
+	var chain_count := snake.size()
+	var chain_col := Color("6aa75a") if chain_count <= 14 else (COLOR_BRASS if chain_count <= GRINDER_DOSE_CAP else COLOR_DANGER)
+	draw_string(hud_font, Vector2(330, 34), "Chain: %d" % chain_count, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, chain_col)
 
 	var speed_text := "Speed: %.1fx" % (0.13 / move_interval)
 	draw_string(hud_font, Vector2(330, 64), speed_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
