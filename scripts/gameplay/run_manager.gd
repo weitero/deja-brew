@@ -101,7 +101,7 @@ var best_score := 0
 var performance_score := 0
 var adaptive_enemy_speed := 1.0
 var saved_high_score := 0
-var move_interval := 0.13
+var move_interval := 0.1444  # 0.9x speed constant
 var move_accumulator := 0.0
 var freshness := FRESHNESS_MAX
 var is_paused := false
@@ -220,7 +220,7 @@ func _ready() -> void:
 	load_high_score()
 	hud_font = ThemeDB.fallback_font
 	_update_ui_scale()
-	_last_viewport_size = get_viewport_rect().size
+	_last_viewport_size = Vector2(get_window().size)
 
 	set_process(true)
 	set_physics_process(true)
@@ -1315,12 +1315,12 @@ func try_set_direction(candidate: Vector2i) -> void:
 	next_direction = candidate
 
 func _physics_process(delta: float) -> void:
+	if Vector2(get_window().size) != _last_viewport_size:
+		_update_ui_scale()
+		_last_viewport_size = Vector2(get_window().size)
+
 	if game_state != GameState.PLAYING:
 		return
-
-	if get_viewport_rect().size != _last_viewport_size:
-		_update_ui_scale()
-		_last_viewport_size = get_viewport_rect().size
 
 	# Always advance the wave manager timer so banners expire on schedule.
 	wave_mgr.update(delta)
@@ -1505,7 +1505,6 @@ func reflected_direction(current_dir: Vector2i, grows: bool) -> Vector2i:
 		Vector2i(-1, -1),
 		Vector2i(1, -1)
 	]
-	fallback_dirs.shuffle()
 	for fallback_dir in fallback_dirs:
 		if not is_cell_blocked(head + fallback_dir, grows):
 			return fallback_dir
@@ -1559,7 +1558,6 @@ func step_game() -> void:
 		return
 
 	if grows:
-		move_interval = max(0.07, move_interval - 0.0025)
 		if grows_idle:
 			remove_idle_bean_at(new_head)
 		if grows_broken:
@@ -1831,6 +1829,10 @@ func draw_level_complete_panel() -> void:
 			HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_BRASS)
 
 func _process(delta: float) -> void:
+	if Vector2(get_window().size) != _last_viewport_size:
+		_update_ui_scale()
+		_last_viewport_size = Vector2(get_window().size)
+
 	if game_state == GameState.PLAYING or game_state == GameState.LEVEL_COMPLETE or wave_mgr.is_in_banner():
 		grinder_angle += delta * 3.0
 
@@ -2045,7 +2047,7 @@ func draw_machine_hazards() -> void:
 			draw_rect(Rect2(board_origin.x, y, board_size.x, cell_px()), Color(0.78, 0.78, 0.75, 0.7), false, 2.0)
 
 func draw_background() -> void:
-	var viewport_size := get_viewport_rect().size
+	var viewport_size := Vector2(get_window().size)
 	draw_rect(Rect2(Vector2.ZERO, viewport_size), COLOR_BG_TOP, true)
 
 	var stripe_count := 24
@@ -2595,12 +2597,12 @@ func cell_px() -> float:
 	return float(CELL_SIZE) * ui_scale
 
 func _update_ui_scale() -> void:
-	var viewport_size := get_viewport_rect().size
+	var viewport_size := Vector2(get_window().size)
 	var board_w := float(GRID_SIZE.x * CELL_SIZE)
 	var board_h := float(GRID_SIZE.y * CELL_SIZE)
 	var available_w := maxf(320.0, viewport_size.x - BOARD_PADDING * 2.0)
 	var available_h := maxf(240.0, viewport_size.y - HUD_HEIGHT - BOARD_PADDING * 2.0)
-	ui_scale = clampf(minf(available_w / board_w, available_h / board_h), 0.65, 2.0)
+	ui_scale = maxf(0.65, minf(available_w / board_w, available_h / board_h))
 	board_size = Vector2(board_w, board_h) * ui_scale
 	board_origin = Vector2(
 		floor((viewport_size.x - board_size.x) * 0.5),

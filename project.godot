@@ -22,7 +22,11 @@ config/features=PackedStringArray("4.6")
 
 window/size/viewport_width=960
 window/size/viewport_height=720
-window/stretch/mode="canvas_items"
+window/size/resizable=true
+window/size/max_width=4096
+window/size/max_height=2160
+window/stretch/mode="ignore"
+window/stretch/aspect="keep"
 
 [rendering]
 
