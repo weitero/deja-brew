@@ -44,6 +44,19 @@ var game_over := false
 var time_alive := 0.0
 var hud_font: Font
 
+enum GameState {
+	START_MENU,
+	PLAYING,
+	PAUSED,
+	GAME_OVER
+}
+
+var game_state: GameState = GameState.START_MENU
+var start_menu_index := 0
+var pause_menu_index := 0
+var start_menu_options := ["START RUN", "QUIT"]
+var pause_menu_options := ["RESUME", "RESTART", "QUIT"]
+
 func _ready() -> void:
 	rng.randomize()
 	hud_font = ThemeDB.fallback_font
@@ -57,6 +70,7 @@ func _ready() -> void:
 	set_process(true)
 	set_physics_process(true)
 	start_new_run()
+	game_state = GameState.START_MENU
 
 func start_new_run() -> void:
 	score = 0
@@ -78,6 +92,28 @@ func start_new_run() -> void:
 	spawn_food()
 	queue_redraw()
 
+func set_pause_state(paused: bool) -> void:
+	is_paused = paused
+	game_state = GameState.PAUSED if paused else GameState.PLAYING
+	queue_redraw()
+
+func activate_start_option() -> void:
+	if start_menu_index == 0:
+		start_new_run()
+		game_state = GameState.PLAYING
+	else:
+		get_tree().quit()
+
+func activate_pause_option() -> void:
+	match pause_menu_index:
+		0:
+			set_pause_state(false)
+		1:
+			start_new_run()
+			game_state = GameState.PLAYING
+		2:
+			get_tree().quit()
+
 func spawn_food() -> void:
 	var occupied := {}
 	for segment in snake:
@@ -90,18 +126,62 @@ func spawn_food() -> void:
 			return
 
 func _unhandled_input(event: InputEvent) -> void:
-	if event.is_action_pressed("ui_cancel"):
-		get_tree().quit()
-
 	if event is InputEventKey and event.pressed and not event.echo:
 		var key_event := event as InputEventKey
 
-		if key_event.keycode == KEY_SPACE and not game_over:
-			is_paused = not is_paused
+		if game_state == GameState.START_MENU:
+			if key_event.keycode == KEY_UP or key_event.keycode == KEY_W:
+				start_menu_index = posmod(start_menu_index - 1, start_menu_options.size())
+				queue_redraw()
+				return
+			if key_event.keycode == KEY_DOWN or key_event.keycode == KEY_S:
+				start_menu_index = posmod(start_menu_index + 1, start_menu_options.size())
+				queue_redraw()
+				return
+			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
+				activate_start_option()
+				return
 
-		if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
-			if game_over:
+		if key_event.keycode == KEY_ESCAPE:
+			if game_state == GameState.PLAYING:
+				pause_menu_index = 0
+				set_pause_state(true)
+				return
+			elif game_state == GameState.PAUSED:
+				set_pause_state(false)
+				return
+			elif game_state == GameState.START_MENU:
+				get_tree().quit()
+				return
+
+		if game_state == GameState.PAUSED:
+			if key_event.keycode == KEY_UP or key_event.keycode == KEY_W:
+				pause_menu_index = posmod(pause_menu_index - 1, pause_menu_options.size())
+				queue_redraw()
+				return
+			if key_event.keycode == KEY_DOWN or key_event.keycode == KEY_S:
+				pause_menu_index = posmod(pause_menu_index + 1, pause_menu_options.size())
+				queue_redraw()
+				return
+			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
+				activate_pause_option()
+				return
+
+		if game_state == GameState.GAME_OVER:
+			if key_event.keycode == KEY_ENTER or key_event.keycode == KEY_KP_ENTER:
 				start_new_run()
+				game_state = GameState.PLAYING
+				return
+			if key_event.keycode == KEY_ESCAPE:
+				game_state = GameState.START_MENU
+				return
+
+		if key_event.keycode == KEY_SPACE and game_state == GameState.PLAYING:
+			set_pause_state(true)
+			return
+
+		if game_state != GameState.PLAYING:
+			return
 
 		if key_event.keycode == KEY_W:
 			try_set_direction(Vector2i.UP)
@@ -111,6 +191,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			try_set_direction(Vector2i.LEFT)
 		elif key_event.keycode == KEY_D:
 			try_set_direction(Vector2i.RIGHT)
+
+	if game_state != GameState.PLAYING:
+		return
 
 	if event.is_action_pressed("ui_up"):
 		try_set_direction(Vector2i.UP)
@@ -129,7 +212,7 @@ func try_set_direction(candidate: Vector2i) -> void:
 	next_direction = candidate
 
 func _physics_process(delta: float) -> void:
-	if game_over or is_paused:
+	if game_state != GameState.PLAYING:
 		return
 
 	time_alive += delta
@@ -166,6 +249,7 @@ func step_game() -> void:
 
 func trigger_game_over() -> void:
 	game_over = true
+	game_state = GameState.GAME_OVER
 	best_score = max(best_score, score)
 	queue_redraw()
 
@@ -323,14 +407,61 @@ func draw_hud() -> void:
 	var speed_text := "Speed: %.1fx" % (0.13 / move_interval)
 	draw_string(hud_font, Vector2(330, 64), speed_text, HORIZONTAL_ALIGNMENT_LEFT, -1, 20, COLOR_TEXT)
 
-	var controls := "Arrows / WASD Move   Space Pause   Enter Restart   Esc Quit"
+	var controls := "Arrows / WASD Move   Esc Pause Menu   Enter Select"
 	draw_string(hud_font, Vector2(520, 64), controls, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
 
-	if is_paused and not game_over:
-		draw_centered_panel("PAUSED", "Press Space to continue")
+	if game_state == GameState.START_MENU:
+		draw_start_menu()
 
-	if game_over:
+	if game_state == GameState.PAUSED:
+		draw_pause_menu()
+
+	if game_state == GameState.GAME_OVER:
 		draw_centered_panel("PRESSURE LOST", "Press Enter to restart")
+
+func draw_start_menu() -> void:
+	var viewport_size := get_viewport_rect().size
+	var panel_size := Vector2(460, 250)
+	var panel_pos := (viewport_size - panel_size) * 0.5
+
+	draw_rect(Rect2(panel_pos, panel_size), Color(0.11, 0.08, 0.06, 0.96), true)
+	draw_rect(Rect2(panel_pos, panel_size), COLOR_PANEL_EDGE, false, 3.0)
+	draw_string(hud_font, panel_pos + Vector2(36, 52), "KAMIKAZE SNAKE", HORIZONTAL_ALIGNMENT_LEFT, -1, 36, COLOR_BRASS)
+	draw_string(hud_font, panel_pos + Vector2(36, 82), "Inside the machine. Stay sharp.", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_TEXT)
+
+	for i: int in range(start_menu_options.size()):
+		var y := panel_pos.y + 132.0 + float(i) * 42.0
+		var selected := i == start_menu_index
+		if selected:
+			draw_rect(Rect2(panel_pos.x + 30.0, y - 24.0, panel_size.x - 60.0, 30.0), Color(0.45, 0.30, 0.17, 0.45), true)
+			draw_rect(Rect2(panel_pos.x + 30.0, y - 24.0, panel_size.x - 60.0, 30.0), COLOR_BRASS, false, 2.0)
+			draw_string(hud_font, Vector2(panel_pos.x + 52.0, y - 3.0), "> " + start_menu_options[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, COLOR_BRASS)
+		else:
+			draw_string(hud_font, Vector2(panel_pos.x + 52.0, y - 3.0), "  " + start_menu_options[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 24, COLOR_TEXT)
+
+	draw_string(hud_font, panel_pos + Vector2(36, 228), "W/S or Up/Down to navigate, Enter to select, Esc to quit", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
+
+func draw_pause_menu() -> void:
+	var viewport_size := get_viewport_rect().size
+	var panel_size := Vector2(420, 250)
+	var panel_pos := (viewport_size - panel_size) * 0.5
+
+	draw_rect(Rect2(panel_pos, panel_size), Color(0.11, 0.08, 0.06, 0.96), true)
+	draw_rect(Rect2(panel_pos, panel_size), COLOR_PANEL_EDGE, false, 3.0)
+	draw_string(hud_font, panel_pos + Vector2(38, 56), "PAUSE VALVE", HORIZONTAL_ALIGNMENT_LEFT, -1, 34, COLOR_DANGER)
+	draw_string(hud_font, panel_pos + Vector2(38, 86), "Machine pressure is on hold.", HORIZONTAL_ALIGNMENT_LEFT, -1, 18, COLOR_TEXT)
+
+	for i: int in range(pause_menu_options.size()):
+		var y := panel_pos.y + 132.0 + float(i) * 36.0
+		var selected := i == pause_menu_index
+		if selected:
+			draw_rect(Rect2(panel_pos.x + 32.0, y - 22.0, panel_size.x - 64.0, 28.0), Color(0.45, 0.30, 0.17, 0.45), true)
+			draw_rect(Rect2(panel_pos.x + 32.0, y - 22.0, panel_size.x - 64.0, 28.0), COLOR_BRASS, false, 2.0)
+			draw_string(hud_font, Vector2(panel_pos.x + 52.0, y - 2.0), "> " + pause_menu_options[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 23, COLOR_BRASS)
+		else:
+			draw_string(hud_font, Vector2(panel_pos.x + 52.0, y - 2.0), "  " + pause_menu_options[i], HORIZONTAL_ALIGNMENT_LEFT, -1, 23, COLOR_TEXT)
+
+	draw_string(hud_font, panel_pos + Vector2(38, 226), "Esc resumes instantly", HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("ccb99a"))
 
 func draw_centered_panel(title: String, subtitle: String) -> void:
 	var viewport_size := get_viewport_rect().size
