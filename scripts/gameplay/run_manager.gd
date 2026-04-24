@@ -86,6 +86,9 @@ var rng := RandomNumberGenerator.new()
 
 var score := 0
 var best_score := 0
+
+var performance_score := 0
+var adaptive_enemy_speed := 1.0
 var saved_high_score := 0
 var move_interval := 0.13
 var move_accumulator := 0.0
@@ -526,6 +529,8 @@ func scatter_chain_from_index(start_index: int) -> void:
 	snake.resize(start_index)
 	prune_segment_indices()
 	freshness = maxf(0.0, freshness - float(detached_count) * CHAIN_SCATTER_FRESHNESS_LOSS)
+	performance_score -= 1
+	update_adaptive_difficulty()
 	if freshness <= 0.0:
 		trigger_game_over()
 
@@ -592,7 +597,7 @@ func apply_decaf_hit() -> void:
 			break
 
 func update_decaf_beans(delta: float) -> void:
-	decaf_move_timer -= delta
+	decaf_move_timer -= delta * adaptive_enemy_speed
 	if decaf_move_timer > 0.0:
 		return
 	decaf_move_timer += DECAF_MOVE_INTERVAL
@@ -609,7 +614,7 @@ func update_decaf_beans(delta: float) -> void:
 		decaf_beans[i]["cell"] = next
 
 func update_water_drops(delta: float) -> void:
-	water_drop_move_timer -= delta
+	water_drop_move_timer -= delta * adaptive_enemy_speed
 	if water_drop_move_timer > 0.0:
 		return
 	water_drop_move_timer += WATER_DROP_MOVE_INTERVAL
@@ -681,7 +686,7 @@ func update_scoop(delta: float) -> void:
 			scoop_timer = SCOOP_INTERVAL
 		return
 
-	scoop_timer -= delta
+	scoop_timer -= delta * adaptive_enemy_speed
 	if scoop_timer <= 0.0:
 		scoop_timer += SCOOP_INTERVAL
 		scoop_telegraph_left = SCOOP_TELEGRAPH_SEC
@@ -723,7 +728,7 @@ func update_mechanical_arm(delta: float) -> void:
 			arm_applied = false
 		return
 
-	arm_timer -= delta
+	arm_timer -= delta * adaptive_enemy_speed
 	if arm_timer <= 0.0:
 		arm_timer += ARM_INTERVAL
 		arm_telegraph_left = ARM_TELEGRAPH_SEC
@@ -769,10 +774,21 @@ func finalize_extraction(auto_pull: bool) -> void:
 	var delta := final_score - extraction_base_score
 	score += delta
 	best_score = max(best_score, score)
-	extraction_feedback = extraction_label(extraction_timer)
+	
+	if mult == 1.0 and extraction_base_score == 36:
+		performance_score += 5
+		score += 500
+		freshness = minf(100.0, freshness + 15.0)
+		extraction_feedback = "GOD SHOT!"
+	else:
+		extraction_feedback = extraction_label(extraction_timer)
+		
+	update_adaptive_difficulty()
 	extraction_feedback_ttl = 1.8
 	if auto_pull:
 		freshness = maxf(0.0, freshness - EXTRACTION_FRESHNESS_MISS_PENALTY)
+		performance_score -= 1
+		update_adaptive_difficulty()
 	extraction_active = false
 	extraction_timer = 0.0
 	extraction_base_score = 0
@@ -931,6 +947,8 @@ func process_grind(delta: float) -> void:
 		else:
 			grind_wasted_count += 1
 			freshness = maxf(0.0, freshness - WASTE_FRESHNESS_PENALTY)
+			performance_score -= 1
+			update_adaptive_difficulty()
 			spawn_waste_spill(consumed)
 			if freshness <= 0.0:
 				trigger_game_over()
@@ -939,6 +957,13 @@ func process_grind(delta: float) -> void:
 		if snake.is_empty():
 			is_grinding = false
 			begin_extraction_from_grind(grind_grounded_count)
+			
+			if grind_grounded_count == GRINDER_DOSE_CAP:
+				performance_score += 1
+			if grind_wasted_count > 0:
+				performance_score -= (grind_wasted_count / 3)
+			update_adaptive_difficulty()
+			
 			grind_grounded_count = 0
 			grind_wasted_count = 0
 			spawn_new_leader_bean()
@@ -1440,6 +1465,20 @@ func _process(delta: float) -> void:
 
 	queue_redraw()
 
+func update_adaptive_difficulty() -> void:
+	if performance_score <= -3:
+		bean_trickle_interval = 8.0 / 0.7
+		adaptive_enemy_speed = 0.7
+	elif performance_score >= 7:
+		bean_trickle_interval = 8.0 / 1.6
+		adaptive_enemy_speed = 1.6
+	elif performance_score >= 3:
+		bean_trickle_interval = 8.0 / 1.3
+		adaptive_enemy_speed = 1.3
+	else:
+		bean_trickle_interval = 8.0
+		adaptive_enemy_speed = 1.0
+
 func _draw() -> void:
 	draw_background()
 	draw_machine_frame()
@@ -1447,12 +1486,51 @@ func _draw() -> void:
 	draw_machine_hazards()
 	draw_grinder()
 	draw_ingredient_hazards()
+	draw_enemy_hazards()
 	draw_idle_beans()
 	draw_snake()
 	draw_grind_pops()
 	draw_waste_spills()
 	draw_wake_pulses()
 	draw_hud()
+
+func draw_enemy_hazards() -> void:
+	for i in range(decaf_beans.size()):
+		var cell: Vector2i = decaf_beans[i]["cell"]
+		var px := grid_to_pixel(cell)
+		draw_coffee_bean(px, Color("66bb6a"), Color("81c784"), Color("388e3c"))
+
+	for drop in water_drops:
+		var cell: Vector2i = drop["cell"]
+		var px := grid_to_pixel(cell)
+		var center := px + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+		draw_circle(center, CELL_SIZE * 0.35, Color(0.26, 0.65, 0.96, 0.7))
+		draw_circle(center + Vector2(-2, -3), CELL_SIZE * 0.1, Color(0.8, 0.95, 1.0, 0.8))
+
+	if scoop_telegraph_left > 0.0:
+		var t := 1.0 - (scoop_telegraph_left / SCOOP_TELEGRAPH_SEC)
+		var center := grid_to_pixel(scoop_center) + Vector2(CELL_SIZE * 0.5, CELL_SIZE * 0.5)
+		var radius := CELL_SIZE * SCOOP_RADIUS_CELLS * t
+		draw_circle(center, radius, Color(0.0, 0.0, 0.0, 0.4))
+
+	if arm_telegraph_left > 0.0:
+		var alpha := 1.0 - (arm_telegraph_left / ARM_TELEGRAPH_SEC)
+		var px := grid_to_pixel(Vector2i(0, arm_line_index) if arm_is_row else Vector2i(arm_line_index, 0))
+		if arm_is_row:
+			draw_rect(Rect2(board_origin.x, px.y, board_size.x, CELL_SIZE), Color(1.0, 0.0, 0.0, alpha * 0.3), true)
+		else:
+			draw_rect(Rect2(px.x, board_origin.y, CELL_SIZE, board_size.y), Color(1.0, 0.0, 0.0, alpha * 0.3), true)
+	elif arm_active_left > 0.0:
+		var progress := 1.0 - (arm_active_left / ARM_ACTIVE_SEC)
+		var thickness := CELL_SIZE * 0.8
+		if arm_is_row:
+			var cx := board_origin.x + (board_size.x * progress) if arm_push_dir == Vector2i.RIGHT else board_origin.x + board_size.x * (1.0 - progress)
+			var y := grid_to_pixel(Vector2i(0, arm_line_index)).y
+			draw_rect(Rect2(cx - thickness/2, y, thickness, CELL_SIZE), Color(0.6, 0.6, 0.6, 1.0), true)
+		else:
+			var cy := board_origin.y + (board_size.y * progress) if arm_push_dir == Vector2i.DOWN else board_origin.y + board_size.y * (1.0 - progress)
+			var x := grid_to_pixel(Vector2i(arm_line_index, 0)).x
+			draw_rect(Rect2(x, cy - thickness/2, CELL_SIZE, thickness), Color(0.6, 0.6, 0.6, 1.0), true)
 
 func draw_ingredient_hazards() -> void:
 	for pebble in pebble_cells:
